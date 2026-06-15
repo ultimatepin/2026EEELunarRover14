@@ -1,16 +1,46 @@
 #include "Network.h"
 #include "Secrets.h"
 
+/*
+  Network.cpp
+  ===========
+
+  WiFi connection and reconnection logic.
+
+  This file deliberately does not know about routes like /api/ping. It only
+  knows how to connect/reconnect the WINC1500 shield and restart the raw server
+  if WiFi comes back.
+*/
+
+/*
+  This server object is created in the .ino file.
+  We need it here so maintainWiFi() can call server.begin() after reconnecting.
+*/
 extern WiFiServer server;
 
 namespace
 {
+  /* Last time maintainWiFi() performed a check. */
   unsigned long lastWiFiMaintainMs = 0;
+
+  /*
+    Startup WiFi timeout.
+
+    If credentials are wrong or the hotspot is unavailable, the board prints an
+    error instead of dot-looping forever.
+  */
   const unsigned long WIFI_CONNECT_TIMEOUT_MS = 30000;
 }
 
 String ipAddressToString(const IPAddress &ip)
 {
+  /*
+    Some Arduino cores support ip.toString(), but this byte-by-byte version is
+    safer across WiFi101/WINC1500 variants.
+
+    IPAddress behaves like a 4-byte array:
+      ip[0], ip[1], ip[2], ip[3]
+  */
   return String(ip[0]) + "." +
          String(ip[1]) + "." +
          String(ip[2]) + "." +
@@ -29,6 +59,10 @@ void printWiFiStatus()
 
 void connectToWiFiBlocking()
 {
+  /*
+    Check that the WINC1500 shield is detected.
+    If this fails, common causes are shield seating, power, or SPI/pin issues.
+  */
   if (WiFi.status() == WL_NO_SHIELD)
   {
     Serial.println(F("ERROR: WINC1500/WiFi101 shield not detected."));
@@ -48,6 +82,16 @@ void connectToWiFiBlocking()
   int status = WL_IDLE_STATUS;
   const unsigned long connectStartMs = millis();
 
+  /*
+    Keep trying until connected or timeout.
+
+    Parameter source:
+      WIFI_SSID and WIFI_PASS come from Secrets.h.
+
+    Hotspot note:
+      Many phone hotspots are 2.4 GHz compatible, but settings differ. If this
+      times out, check hotspot visibility and password first.
+  */
   while (status != WL_CONNECTED)
   {
     status = WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -74,6 +118,15 @@ void connectToWiFiBlocking()
 
 void maintainWiFi()
 {
+  /*
+    Non-blocking periodic check.
+
+    Django analogy:
+      This is a tiny health-check loop, not a request handler.
+
+    Arduino principle:
+      Use millis() timing instead of delay() so the server keeps responding.
+  */
   const unsigned long now = millis();
 
   if (now - lastWiFiMaintainMs < WIFI_MAINTAIN_INTERVAL_MS)
@@ -97,6 +150,11 @@ void maintainWiFi()
     Serial.println(F("WiFi reconnected."));
     printWiFiStatus();
 
+    /*
+      Important for this project:
+      After WiFi reconnects, restart the listening socket. Otherwise the board
+      may be connected to WiFi but not accepting HTTP requests.
+    */
     server.begin();
     Serial.println(F("Raw HTTP server restarted."));
   }

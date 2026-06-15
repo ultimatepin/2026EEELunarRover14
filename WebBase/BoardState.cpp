@@ -1,13 +1,36 @@
 #include "BoardState.h"
 #include "Network.h"
 
+/*
+  BoardState.cpp
+  ==============
+
+  This file contains hardware-facing code:
+  - configure pins,
+  - read pins/sensors,
+  - track LED state,
+  - format board state as JSON.
+
+  Keeping this separate from WebRoutes.cpp makes the project easier to extend.
+  Later, if you add a temperature sensor, put the sensor-reading logic here and
+  expose the result through BoardSnapshot / JSON helpers.
+*/
+
 namespace
 {
   /*
-    Private state variable.
+    File-private variable
+    ---------------------
 
-    We store LED state ourselves because digitalWrite() changes the pin,
-    but Arduino does not provide a clean universal "what did I last write?" API.
+    namespace { ... } in a .cpp file makes names private to this file.
+
+    Django/Python analogy:
+      This is like a module-level private variable, except C++ enforces file
+      visibility more strongly.
+
+    Why store LED state ourselves?
+      digitalWrite(LED_PIN, HIGH/LOW) changes the pin output, but there is no
+      portable Arduino function that says "what value did I last write?".
   */
   bool ledIsOn = false;
 }
@@ -16,22 +39,25 @@ void setupBoardPins()
 {
   /*
     pinMode(pin, mode)
+    ------------------
 
-    Parameters:
-    - pin: Arduino pin number, such as LED_BUILTIN, D5, A0
-    - mode:
-      - OUTPUT: the microcontroller drives voltage HIGH/LOW
-      - INPUT: the pin reads external voltage
-      - INPUT_PULLUP: the pin reads input and also enables an internal pull-up resistor
+    OUTPUT:
+      The microcontroller drives the pin HIGH or LOW.
 
-    INPUT_PULLUP principle:
-    A floating input pin randomly reads HIGH/LOW.
-    INPUT_PULLUP weakly connects the pin to 3.3V internally, so it reads HIGH by default.
-    If you connect the pin to GND through a button/switch, it reads LOW.
+    INPUT_PULLUP:
+      The microcontroller reads the pin, and also weakly connects it to 3.3V
+      internally. This prevents the input from "floating" randomly.
+
+    Practical D5 wiring:
+      - Nothing connected: digitalRead(D5) usually returns HIGH.
+      - Button/switch connecting D5 to GND: digitalRead(D5) returns LOW.
   */
   pinMode(LED_PIN, OUTPUT);
   pinMode(SAMPLE_DIGITAL_PIN, INPUT_PULLUP);
 
+  /*
+    Start LED off so hardware state and our stored ledIsOn variable agree.
+  */
   setLedState(false);
 }
 
@@ -42,46 +68,75 @@ bool getLedState()
 
 void setLedState(bool on)
 {
+  /*
+    Parameter:
+      on = true   -> turn LED on
+      on = false  -> turn LED off
+
+    This function updates both:
+      1. software state: ledIsOn
+      2. hardware output: digitalWrite(...)
+  */
   ledIsOn = on;
 
   /*
-    digitalWrite(pin, value)
-
     HIGH usually means 3.3V on Metro M0.
     LOW means 0V/GND.
 
-    For LED_BUILTIN:
-    HIGH usually turns the LED on.
+    For LED_BUILTIN on Metro M0, HIGH normally turns the LED on.
   */
   digitalWrite(LED_PIN, ledIsOn ? HIGH : LOW);
 }
 
 BoardSnapshot readBoardSnapshot()
 {
+  /*
+    Collect all board readings into one value.
+
+    Django analogy:
+      This is like building the context object before returning JsonResponse().
+  */
   BoardSnapshot snapshot;
 
   snapshot.ledOn = getLedState();
 
   /*
     analogRead(A0)
+    --------------
 
-    Reads voltage on A0 and converts it to a number.
-    On many Arduino boards the default range is 0..1023.
-    Later, you can replace this with your real sensor-processing logic.
+    Reads voltage on A0 and returns a number.
+    On many Arduino boards this is 0..1023 by default, but exact resolution can
+    vary by board/core configuration.
   */
   snapshot.analogA0 = analogRead(SAMPLE_ANALOG_PIN);
 
   /*
     digitalRead(D5)
+    ---------------
 
-    With INPUT_PULLUP:
-    - HIGH means open / not connected to ground
-    - LOW means connected to ground
+    Because D5 is INPUT_PULLUP:
+      HIGH = open/not grounded
+      LOW  = connected to GND
   */
   snapshot.digitalD5 = digitalRead(SAMPLE_DIGITAL_PIN);
 
+  /*
+    millis() is time since boot in milliseconds.
+    It eventually overflows after many days, but subtraction-based timing still
+    works correctly for normal Arduino patterns.
+  */
   snapshot.uptimeMs = millis();
+
+  /*
+    WiFi.RSSI() returns signal strength in dBm.
+    Example: -35 is stronger than -80.
+  */
   snapshot.wifiRssi = WiFi.RSSI();
+
+  /*
+    WiFi.localIP() returns an IPAddress object.
+    Network.cpp converts it to text when making JSON.
+  */
   snapshot.ip = WiFi.localIP();
 
   return snapshot;
@@ -90,10 +145,15 @@ BoardSnapshot readBoardSnapshot()
 String boardFullStateToJson(const BoardSnapshot &snapshot, unsigned long requestCount)
 {
   /*
-    Full JSON response.
+    Full JSON response for /api/state.
 
-    This includes LED state and general board status.
-    It is kept for backwards compatibility at /api/state.
+    Parameters:
+      snapshot:      board values collected by readBoardSnapshot().
+      requestCount:  total-ish count of handled known requests.
+
+    const BoardSnapshot & means:
+      - pass the snapshot by reference, so it is not copied,
+      - const means this function promises not to modify it.
   */
   String json = "{";
 
@@ -127,11 +187,11 @@ String boardFullStateToJson(const BoardSnapshot &snapshot, unsigned long request
 String boardStatusToJson(const BoardSnapshot &snapshot, unsigned long requestCount)
 {
   /*
-    Status-only JSON response.
+    Status-only JSON for /api/status.
 
-    This intentionally excludes LED state.
-    The webpage polls this periodically so that normal live updates do not
-    constantly touch or refresh the LED control state.
+    This intentionally excludes led_on. The dashboard polls /api/status every
+    few seconds, but LED state is updated only after a button request. This
+    avoids mixing "live sensor polling" with "LED command result".
   */
   String json = "{";
 
@@ -162,10 +222,10 @@ String boardStatusToJson(const BoardSnapshot &snapshot, unsigned long requestCou
 String boardLedToJson()
 {
   /*
-    LED-only JSON response.
+    Small LED response for /api/led.
 
-    This is returned by /api/led after a button press.
-    It is small and fast, so LED commands feel more reliable.
+    Example:
+      {"led_on":true}
   */
   String json = "{";
   json += "\"led_on\":";
