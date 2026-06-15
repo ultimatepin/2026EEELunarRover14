@@ -30,8 +30,8 @@
 
 #define SIMULATED_MODE false   // Toggle: true = software sim, false = real HW
 
-const char ssid[] = "Brick";
-const char pass[] = "qiantian2007";
+const char ssid[] = "";
+const char pass[] = "";
 const int groupNumber = 14;    // Set to your group number on EEERover network
 
 // --- Pin assignments (agree with hardware teammates) ---
