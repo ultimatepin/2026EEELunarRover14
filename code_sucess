@@ -1,0 +1,972 @@
+/******************************************************************************
+ *  EEELunarRover — Classification, Motor Control & Dashboard
+ *  
+ *  Author: Sijie Fei
+ *  Date:   May 2026
+ *  
+ *  This code extends the starter template with:
+ *    1. UART radio age decoding (Serial1, 600 bps)
+ *    2. IR pulse rate estimation using Poisson log-likelihood ratio test
+ *    3. Ultrasonic 40 kHz presence detection
+ *    4. Magnetic polarity classification (BMM150 3-axis magnetometer via I2C)
+ *    5. Multi-sensor fusion with confidence scoring
+ *    6. 4-motor mecanum wheel control (8 directions + rotation)
+ *    7. Web dashboard with joystick + button controls
+ *    8. Non-blocking main loop (no delay())
+ *  
+ *  SIMULATED_MODE = true  → all sensors driven by software-generated data
+ *  SIMULATED_MODE = false → reads from real hardware pins
+ *  
+ *  Motor pins use placeholder values — update when hardware team confirms
+ *  the driver board and wiring.
+ ******************************************************************************/
+
+#define USE_WIFI_NINA false
+#define USE_WIFI101   true
+#include <WiFiWebServer.h>
+#include <DFRobot_BMM150.h>       // Install: https://github.com/DFRobot/DFRobot_BMM150
+
+// ========================== CONFIGURATION ==========================
+
+#define SIMULATED_MODE false   // Toggle: true = software sim, false = real HW
+
+const char ssid[] = "Brick";
+const char pass[] = "qiantian2007";
+const int groupNumber = 14;    // Set to your group number on EEERover network
+
+// --- Pin assignments (agree with hardware teammates) ---
+// Pins 5, 7, 10 are RESERVED for WiFi — do not use
+const int PIN_IR_INTERRUPT  = 9;   // External interrupt for IR pulses
+const int PIN_ULTRASONIC    = 1;   // Digital input: ultrasonic detection
+// Serial1 (Pin 0) is used for UART radio data — do not reassign
+// BMM150 uses I2C: SDA = Pin 20, SCL = Pin 21 on Metro M0 (default Wire pins)
+
+// --- Motor pin assignments (4 mecanum wheels) ---
+// TODO: Update these once Colin confirms the driver board and wiring
+// Convention: FL = front-left, FR = front-right, RL = rear-left, RR = rear-right
+// Each motor needs DIR (direction) + PWM (speed) pins
+// PWM pins on Metro M0: 3, 4, 6, 8, 9, 11, 12, 13 (check PWM capability)
+// NOTE: Pin 3 is also used for ultrasonic — reassign if conflict arises
+const int PIN_FL_DIR = 8;    // Front-left direction
+const int PIN_FL_PWM = 11;    // Front-left speed (PWM)
+const int PIN_FR_DIR = 2;    // Front-right direction
+const int PIN_FR_PWM = 3;    // Front-right speed (PWM)
+const int PIN_RL_DIR = 12;   // Rear-left direction
+const int PIN_RL_PWM = 13;   // Rear-left speed (PWM)
+const int PIN_RR_DIR = 4;   // Rear-right direction
+const int PIN_RR_PWM = 6;   // Rear-right speed — A1 used as digital PWM (check capability)
+// ^^^ PIN ASSIGNMENTS ARE PLACEHOLDERS — CONFIRM WITH HARDWARE TEAM ^^^
+
+// --- IR estimation parameters ---
+const float LAMBDA_HIGH     = 547.0;  // Basaltoid / Lunarite (s^-1)
+const float LAMBDA_LOW      = 312.0;  // Gravion / Regolix (s^-1)
+const float LAMBDA_THRESHOLD = (LAMBDA_HIGH + LAMBDA_LOW) / 2.0;  // Naive fallback
+const unsigned long IR_WINDOW_MS = 200;  // Counting window duration (ms)
+
+// --- Magnetic sensor parameters (BMM150) ---
+// Z-axis convention: positive Z = field pointing UP (+Z), negative Z = field pointing DOWN (-Z)
+// (Verify with orange disc magnet test — flip if polarity is inverted)
+const float BMM150_DEADZONE_UT  = 30.0;  // µT: ignore readings weaker than this (no magnet / too far)
+const float BMM150_MAX_UT       = 500.0; // µT: saturation reference for confidence scaling
+
+// --- Timing intervals (non-blocking) ---
+const unsigned long SENSOR_POLL_INTERVAL_MS  = 500;   // How often to run classification
+const unsigned long SERIAL_PRINT_INTERVAL_MS = 1000;  // How often to print status
+const unsigned long SIM_UART_INTERVAL_MS     = 3000;  // How often sim sends a new age string
+
+// ========================== DATA STRUCTURES ==========================
+
+// Classification result for a single sensor
+struct SensorResult {
+  bool valid;        // Was a reading successfully obtained?
+  int  classIndex;   // 0 or 1 (sensor-specific meaning)
+  float confidence;  // 0.0 to 1.0
+};
+
+// Overall rock classification
+struct RockClassification {
+  char  age[8];           // e.g. "#123\0"
+  bool  ageValid;
+  
+  // Individual sensor results
+  SensorResult ir;        // classIndex: 0 = low λ, 1 = high λ
+  SensorResult ultrasonic;// classIndex: 0 = absent,  1 = present
+  SensorResult magnetic;  // classIndex: 0 = up,      1 = down
+  
+  // Fused result
+  char  rockType[12];     // "Basaltoid", "Gravion", "Regolix", "Lunarite"
+  float fusionConfidence;
+  bool  fusionValid;
+};
+
+RockClassification currentRock;
+
+// ========================== STATE VARIABLES ==========================
+
+// IR pulse counting
+volatile unsigned long irPulseCount = 0;
+unsigned long irWindowStart = 0;
+bool irWindowActive = false;
+
+// UART age buffer
+char uartBuffer[8];
+int  uartBufferIdx = 0;
+bool uartReceiving = false;
+
+// Timing
+unsigned long lastSensorPoll  = 0;
+unsigned long lastSerialPrint = 0;
+unsigned long lastSimUart     = 0;
+
+// BMM150 state
+bool bmm150Ready = false;  // Set to true only after successful init
+
+// Simulation state
+unsigned long simSeed = 0;
+
+// WiFi server
+WiFiWebServer server(80);
+
+// BMM150 magnetometer (I2C, default address 0x13)
+// CS pin must be connected to GND for I2C mode (see datasheet)
+DFRobot_BMM150_I2C bmm150(&Wire, I2C_ADDRESS_4);  // 0x13
+
+// ========================== SIMULATION MODULE ==========================
+// Generates fake sensor data so the full pipeline can be tested without HW
+
+#if SIMULATED_MODE
+
+// Simple pseudo-random number generator (deterministic, reproducible)
+uint32_t simRandom(uint32_t max) {
+  simSeed = simSeed * 1664525UL + 1013904223UL;  // LCG
+  return simSeed % max;
+}
+
+// Simulate receiving a UART age string on Serial1
+// In real mode, Serial1.read() provides this
+void simulateUartReceive() {
+  // Generate a random age like "#247"
+  char simAge[5];
+  simAge[0] = '#';
+  simAge[1] = '1' + (simRandom(4));       // 1-4
+  simAge[2] = '0' + (simRandom(10));      // 0-9
+  simAge[3] = '0' + (simRandom(10));      // 0-9
+  simAge[4] = '\0';
+  
+  // Feed into the UART parser
+  for (int i = 0; i < 4; i++) {
+    processUartByte(simAge[i]);
+  }
+}
+
+// Simulate IR pulse count over a window
+// Returns a Poisson-distributed count for the given window
+unsigned long simulateIrPulseCount(unsigned long windowMs) {
+  // Simulate Basaltoid (high λ = 547 s^-1) with some noise
+  float trueLambda = (simRandom(2) == 0) ? LAMBDA_HIGH : LAMBDA_LOW;
+  float expectedCount = trueLambda * (windowMs / 1000.0);
+  
+  // Approximate Poisson with Gaussian for large λ: N(λt, λt)
+  // Simple Box-Muller-ish approximation using uniform randoms
+  float u1 = (simRandom(10000) + 1) / 10000.0;
+  float u2 = (simRandom(10000) + 1) / 10000.0;
+  // Rough normal approximation: sum of uniforms, centered
+  float noise = (u1 + u2 - 1.0) * sqrt(expectedCount);
+  
+  long count = (long)(expectedCount + noise);
+  if (count < 0) count = 0;
+  return (unsigned long)count;
+}
+
+// Simulate ultrasonic detection (binary)
+bool simulateUltrasonicPresent() {
+  return (simRandom(2) == 1);  // 50/50 present/absent
+}
+
+// Simulate BMM150 Z-axis reading in µT
+// Positive Z → UP, Negative Z → DOWN (matches typical sensor orientation)
+float simulateBmm150Z() {
+  if (simRandom(2) == 0) {
+    return -(200.0 + simRandom(150));  // Down: -200 to -350 µT
+  } else {
+    return  (200.0 + simRandom(150));  // Up:   +200 to +350 µT
+  }
+}
+
+#endif  // SIMULATED_MODE
+
+// ========================== UART AGE DECODING ==========================
+// Parses incoming bytes looking for '#' followed by 3 digit characters
+
+void processUartByte(char c) {
+  if (c == '#') {
+    // Start of a new age string
+    uartBuffer[0] = '#';
+    uartBufferIdx = 1;
+    uartReceiving = true;
+  } else if (uartReceiving) {
+    uartBuffer[uartBufferIdx] = c;
+    uartBufferIdx++;
+    
+    if (uartBufferIdx >= 4) {
+      // Complete: 4 chars received (#xxx)
+      uartBuffer[4] = '\0';
+      
+      // Validate: chars 1-3 should be digits
+      bool valid = true;
+      for (int i = 1; i < 4; i++) {
+        if (uartBuffer[i] < '0' || uartBuffer[i] > '9') {
+          valid = false;
+          break;
+        }
+      }
+      
+      if (valid) {
+        strncpy(currentRock.age, uartBuffer, sizeof(currentRock.age));
+        currentRock.ageValid = true;
+        Serial.print(F("[UART] Age received: "));
+        Serial.println(currentRock.age);
+      } else {
+        Serial.println(F("[UART] Invalid age string, discarded"));
+      }
+      
+      uartReceiving = false;
+      uartBufferIdx = 0;
+    }
+  }
+  // If not '#' and not currently receiving, ignore (noise)
+}
+
+void pollUart() {
+#if SIMULATED_MODE
+#else
+while (Serial1.available()) {
+    char c = Serial1.read();
+    processUartByte(c);
+}
+#endif
+}
+
+// ========================== IR PULSE RATE ESTIMATION ==========================
+// Uses Poisson log-likelihood ratio test (LRT):
+//   H0: λ = λ_low  (312 s^-1)
+//   H1: λ = λ_high (547 s^-1)
+//   
+//   Log-likelihood ratio: Λ = k * ln(λ1/λ0) - (λ1 - λ0) * T
+//   where k = pulse count, T = window duration in seconds
+//   
+//   Decision: Λ > 0 → H1 (high rate), Λ < 0 → H0 (low rate)
+//   Confidence: derived from |Λ| (larger magnitude = more certain)
+
+// ISR for real hardware mode
+void irPulseISR() {
+  irPulseCount++;
+}
+
+SensorResult classifyIrRate() {
+  SensorResult result;
+  unsigned long count;
+  float windowSec;
+
+#if SIMULATED_MODE
+  windowSec = IR_WINDOW_MS / 1000.0;
+  count = simulateIrPulseCount(IR_WINDOW_MS);
+#else
+  unsigned long now = millis();
+
+  if (!irWindowActive) {
+    // First call after boot: start the counting window, cannot classify yet.
+    // The ISR will accumulate pulses between now and the next call.
+    noInterrupts();
+    irPulseCount = 0;
+    interrupts();
+    irWindowStart = now;
+    irWindowActive = true;
+
+    result.valid = false;
+    result.classIndex = -1;
+    result.confidence = 0.0;
+    Serial.println(F("[IR] Counting window started, waiting for first interval..."));
+    return result;
+  }
+
+  // Subsequent calls: harvest the accumulated count, then restart the window.
+  noInterrupts();
+  count = irPulseCount;
+  irPulseCount = 0;          // Reset for the next window
+  interrupts();
+
+  unsigned long elapsedMs = now - irWindowStart;
+  irWindowStart = now;       // Restart window immediately (no gap)
+
+  if (elapsedMs < 50) {
+    // Window too short — statistically meaningless, skip
+    result.valid = false;
+    result.classIndex = -1;
+    result.confidence = 0.0;
+    Serial.println(F("[IR] Window too short (<50ms), skipping"));
+    return result;
+  }
+
+  windowSec = elapsedMs / 1000.0;
+#endif
+
+  // ---- Common path: LRT classification (both simulated and hardware) ----
+
+  // Observed rate (for debug display only; LRT uses count directly)
+  float observedLambda = count / windowSec;
+
+  // Poisson log-likelihood ratio test
+  //   Λ = k · ln(λ₁/λ₀) − (λ₁ − λ₀) · T
+  float logRatio = count * log(LAMBDA_HIGH / LAMBDA_LOW)
+                   - (LAMBDA_HIGH - LAMBDA_LOW) * windowSec;
+
+  // Decision: Λ > 0 → H₁ (high rate), Λ < 0 → H₀ (low rate)
+  if (logRatio > 0) {
+    result.classIndex = 1;  // High λ (547)
+  } else {
+    result.classIndex = 0;  // Low λ (312)
+  }
+
+  // Confidence: sigmoid-like saturating map of |Λ|
+  float absLR = fabs(logRatio);
+  result.confidence = absLR / (absLR + 5.0);  // → 1.0 as |Λ| → ∞
+
+  result.valid = true;
+
+  Serial.print(F("[IR] Count="));
+  Serial.print(count);
+  Serial.print(F(" T="));
+  Serial.print(windowSec, 3);
+  Serial.print(F("s λ_obs="));
+  Serial.print(observedLambda, 1);
+  Serial.print(F(" LLR="));
+  Serial.print(logRatio, 2);
+  Serial.print(F(" → "));
+  Serial.print(result.classIndex ? "HIGH" : "LOW");
+  Serial.print(F(" (conf="));
+  Serial.print(result.confidence, 2);
+  Serial.println(F(")"));
+
+  return result;
+}
+
+// ========================== ULTRASONIC DETECTION ==========================
+// Binary detection: is a 40 kHz signal present or absent?
+// Hardware teammate provides a digital HIGH/LOW on PIN_ULTRASONIC
+
+SensorResult classifyUltrasonic() {
+  SensorResult result;
+  
+#if SIMULATED_MODE
+  bool present = simulateUltrasonicPresent();
+#else
+  bool present = digitalRead(PIN_ULTRASONIC);
+#endif
+  
+  result.classIndex = present ? 1 : 0;
+  result.confidence = 0.95;  // Digital signal → high confidence when valid
+  result.valid = true;
+  
+  Serial.print(F("[US] 40kHz "));
+  Serial.print(present ? "PRESENT" : "ABSENT");
+  Serial.print(F(" (conf="));
+  Serial.print(result.confidence, 2);
+  Serial.println(F(")"));
+  
+  return result;
+}
+
+// ========================== MAGNETIC POLARITY ==========================
+// BMM150 3-axis magnetometer via I2C.
+// We use the Z-axis to determine polarity: +Z = UP, -Z = DOWN.
+// Readings below BMM150_DEADZONE_UT in magnitude are treated as "no magnet nearby".
+//
+// IMPORTANT: verify polarity convention with the orange disc magnet before the demo.
+// If UP/DOWN is inverted, negate the Z reading (or flip the sensor mounting).
+
+SensorResult classifyMagnetic() {
+  SensorResult result;
+  float z;
+
+#if SIMULATED_MODE
+  z = simulateBmm150Z();
+#else
+  if (!bmm150Ready) {
+    // Sensor never initialised — return invalid so fusion falls back to IR + US
+    result.valid      = false;
+    result.classIndex = -1;
+    result.confidence = 0.0;
+    Serial.println(F("[MAG] BMM150 not available — skipping"));
+    return result;
+  }
+  bmm150.setOperationMode(BMM150_POWERMODE_NORMAL); 
+  sBmm150MagData_t magData = bmm150.getGeomagneticData();
+  z = magData.z;  // µT, positive = field along +Z axis
+#endif
+
+  float absZ = fabs(z);
+
+  if (absZ < BMM150_DEADZONE_UT) {
+    // Too weak — sensor is probably too far from the magnet or no magnet present
+    result.valid     = false;
+    result.classIndex = -1;
+    result.confidence = 0.0;
+    Serial.print(F("[MAG] Z="));
+    Serial.print(z, 1);
+    Serial.println(F(" µT → UNCERTAIN (below deadzone)"));
+  } else {
+    result.valid      = true;
+    // Negative Z = field pointing DOWN into rock surface → classIndex 1
+    // Positive Z = field pointing UP out of rock surface → classIndex 0
+    result.classIndex = (z < 0) ? 1 : 0;
+
+    // Confidence: scales with |Z| up to BMM150_MAX_UT
+    result.confidence = min(1.0f, absZ / BMM150_MAX_UT);
+
+    Serial.print(F("[MAG] Z="));
+    Serial.print(z, 1);
+    Serial.print(F(" µT → "));
+    Serial.print(result.classIndex ? "DOWN" : "UP");
+    Serial.print(F(" (conf="));
+    Serial.print(result.confidence, 2);
+    Serial.println(F(")"));
+  }
+
+  return result;
+}
+
+// ========================== MULTI-SENSOR FUSION ==========================
+// Rock type lookup table:
+//   IR(high) + US(present) + Mag(down) = Basaltoid
+//   IR(low)  + US(absent)  + Mag(down) = Gravion
+//   IR(low)  + US(present) + Mag(up)   = Regolix
+//   IR(high) + US(absent)  + Mag(up)   = Lunarite
+//
+// Encoding: IR=bit2, US=bit1, Mag=bit0
+//   Basaltoid = 1,1,1 = 7
+//   Gravion   = 0,0,1 = 1
+//   Regolix   = 0,1,0 = 2
+//   Lunarite  = 1,0,0 = 4
+//
+// Any 2 of 3 sensors uniquely identify the type.
+// Strategy: if all 3 valid, use all 3 (and check consistency).
+//           if only 2 valid, those 2 are sufficient.
+//           if <2 valid, cannot classify.
+
+// Lookup: given (ir, us, mag) indices, what rock type?
+const char* lookupRockType(int ir, int us, int mag) {
+  int code = (ir << 2) | (us << 1) | mag;
+  switch (code) {
+    case 7: return "Basaltoid";  // 111
+    case 1: return "Gravion";    // 001
+    case 2: return "Regolix";    // 010
+    case 4: return "Lunarite";   // 100
+    default: return "CONFLICT";  // Invalid combination
+  }
+}
+
+void fuseAndClassify() {
+  currentRock.ir         = classifyIrRate();
+  currentRock.ultrasonic = classifyUltrasonic();
+  currentRock.magnetic   = classifyMagnetic();
+  
+  int validCount = (currentRock.ir.valid ? 1 : 0)
+                 + (currentRock.ultrasonic.valid ? 1 : 0)
+                 + (currentRock.magnetic.valid ? 1 : 0);
+  
+  if (validCount < 2) {
+    // Cannot classify with fewer than 2 sensors
+    strncpy(currentRock.rockType, "UNKNOWN", sizeof(currentRock.rockType));
+    currentRock.fusionConfidence = 0.0;
+    currentRock.fusionValid = false;
+    Serial.println(F("[FUSION] Insufficient valid sensors (<2), cannot classify"));
+    return;
+  }
+  
+  // Try all-three classification
+  if (validCount == 3) {
+    const char* fullResult = lookupRockType(
+      currentRock.ir.classIndex,
+      currentRock.ultrasonic.classIndex,
+      currentRock.magnetic.classIndex
+    );
+    
+    if (strcmp(fullResult, "CONFLICT") != 0) {
+      // All three agree on a valid type
+      strncpy(currentRock.rockType, fullResult, sizeof(currentRock.rockType));
+      currentRock.fusionConfidence = 
+        (currentRock.ir.confidence + currentRock.ultrasonic.confidence 
+         + currentRock.magnetic.confidence) / 3.0;
+      currentRock.fusionValid = true;
+      Serial.print(F("[FUSION] All 3 sensors → "));
+      Serial.println(currentRock.rockType);
+      return;
+    }
+    
+    // Conflict: fall through to 2-sensor pairs, pick highest-confidence pair
+    Serial.println(F("[FUSION] 3-sensor conflict, trying 2-sensor pairs"));
+  }
+  
+  // Try each pair of 2 sensors, pick the pair with highest combined confidence
+  struct Pair {
+    int ir, us, mag;          // -1 if that sensor is excluded
+    float totalConf;
+    const char* result;
+  };
+  
+  Pair bestPair;
+  bestPair.totalConf = -1.0;
+  bestPair.result = "UNKNOWN";
+  
+  // Pair 1: IR + US (infer mag from table)
+  if (currentRock.ir.valid && currentRock.ultrasonic.valid) {
+    // For each valid (ir, us) combo, there's exactly one rock type
+    // IR=1,US=1 → Basaltoid(mag=1), IR=0,US=0 → Gravion(mag=1)
+    // IR=0,US=1 → Regolix(mag=0),   IR=1,US=0 → Lunarite(mag=0)
+    int inferredMag;
+    if (currentRock.ir.classIndex == 1 && currentRock.ultrasonic.classIndex == 1) inferredMag = 1;
+    else if (currentRock.ir.classIndex == 0 && currentRock.ultrasonic.classIndex == 0) inferredMag = 1;
+    else if (currentRock.ir.classIndex == 0 && currentRock.ultrasonic.classIndex == 1) inferredMag = 0;
+    else inferredMag = 0;  // ir=1, us=0 → Lunarite → mag=0 (up)
+    
+    float conf = (currentRock.ir.confidence + currentRock.ultrasonic.confidence) / 2.0;
+    const char* res = lookupRockType(currentRock.ir.classIndex, 
+                                      currentRock.ultrasonic.classIndex, inferredMag);
+    if (conf > bestPair.totalConf && strcmp(res, "CONFLICT") != 0) {
+      bestPair.totalConf = conf;
+      bestPair.result = res;
+    }
+  }
+  
+  // Pair 2: IR + Mag (infer us from table)
+  if (currentRock.ir.valid && currentRock.magnetic.valid) {
+    int inferredUs;
+    if (currentRock.ir.classIndex == 1 && currentRock.magnetic.classIndex == 1) inferredUs = 1;      // Basaltoid
+    else if (currentRock.ir.classIndex == 0 && currentRock.magnetic.classIndex == 1) inferredUs = 0;  // Gravion
+    else if (currentRock.ir.classIndex == 0 && currentRock.magnetic.classIndex == 0) inferredUs = 1;  // Regolix
+    else inferredUs = 0;  // ir=1, mag=0 → Lunarite
+    
+    float conf = (currentRock.ir.confidence + currentRock.magnetic.confidence) / 2.0;
+    const char* res = lookupRockType(currentRock.ir.classIndex, inferredUs,
+                                      currentRock.magnetic.classIndex);
+    if (conf > bestPair.totalConf && strcmp(res, "CONFLICT") != 0) {
+      bestPair.totalConf = conf;
+      bestPair.result = res;
+    }
+  }
+  
+  // Pair 3: US + Mag (infer ir from table)
+  if (currentRock.ultrasonic.valid && currentRock.magnetic.valid) {
+    int inferredIr;
+    if (currentRock.ultrasonic.classIndex == 1 && currentRock.magnetic.classIndex == 1) inferredIr = 1;  // Basaltoid
+    else if (currentRock.ultrasonic.classIndex == 0 && currentRock.magnetic.classIndex == 1) inferredIr = 0;  // Gravion
+    else if (currentRock.ultrasonic.classIndex == 1 && currentRock.magnetic.classIndex == 0) inferredIr = 0;  // Regolix
+    else inferredIr = 1;  // us=0, mag=0 → Lunarite
+    
+    float conf = (currentRock.ultrasonic.confidence + currentRock.magnetic.confidence) / 2.0;
+    const char* res = lookupRockType(inferredIr, currentRock.ultrasonic.classIndex,
+                                      currentRock.magnetic.classIndex);
+    if (conf > bestPair.totalConf && strcmp(res, "CONFLICT") != 0) {
+      bestPair.totalConf = conf;
+      bestPair.result = res;
+    }
+  }
+  
+  strncpy(currentRock.rockType, bestPair.result, sizeof(currentRock.rockType));
+  currentRock.fusionConfidence = bestPair.totalConf;
+  currentRock.fusionValid = (bestPair.totalConf > 0);
+  
+  Serial.print(F("[FUSION] Best 2-sensor pair → "));
+  Serial.print(currentRock.rockType);
+  Serial.print(F(" (conf="));
+  Serial.print(currentRock.fusionConfidence, 2);
+  Serial.println(F(")"));
+}
+
+// ========================== MECANUM MOTOR CONTROL ==========================
+// 4-wheel mecanum kinematics:
+//   Each wheel's roller axis is at 45° to the wheel axis.
+//   By combining forward/reverse on each wheel, we get holonomic motion.
+//
+//   Wheel speed signs for each motion command:
+//     Command     FL   FR   RL   RR
+//     forward     +    +    +    +
+//     reverse     -    -    -    -
+//     left        -    +    +    -
+//     right       +    -    -    +
+//     fwd-left    0    +    +    0
+//     fwd-right   +    0    0    +
+//     rev-left    -    0    0    -
+//     rev-right   0    -    -    0
+//     rot-cw      +    -    +    -
+//     rot-ccw     -    +    -    +
+//     stop        0    0    0    0
+
+int motorSpeed = 180;  // Default PWM (0-255), adjustable via /motor?speed=N
+
+void motorsInit() {
+  pinMode(PIN_FL_DIR, OUTPUT);  pinMode(PIN_FL_PWM, OUTPUT);
+  pinMode(PIN_FR_DIR, OUTPUT);  pinMode(PIN_FR_PWM, OUTPUT);
+  pinMode(PIN_RL_DIR, OUTPUT);  pinMode(PIN_RL_PWM, OUTPUT);
+  pinMode(PIN_RR_DIR, OUTPUT);  pinMode(PIN_RR_PWM, OUTPUT);
+  // Start stopped
+  analogWrite(PIN_FL_PWM, 0);  analogWrite(PIN_FR_PWM, 0);
+  analogWrite(PIN_RL_PWM, 0);  analogWrite(PIN_RR_PWM, 0);
+}
+
+// Set a single motor: dir = HIGH for forward, LOW for reverse; spd = 0-255
+void setMotor(int dirPin, int pwmPin, bool forward, int spd) {
+  digitalWrite(dirPin, forward ? LOW : HIGH);
+  analogWrite(pwmPin, spd);
+}
+
+// Set all 4 motors at once. Sign convention: +1 = forward, -1 = reverse, 0 = stop
+void setAllMotors(int fl, int fr, int rl, int rr, int spd) {
+  setMotor(PIN_FL_DIR, PIN_FL_PWM, fl >= 0, fl == 0 ? 0 : spd);
+  setMotor(PIN_FR_DIR, PIN_FR_PWM, fr >= 0, fr == 0 ? 0 : spd);
+  setMotor(PIN_RL_DIR, PIN_RL_PWM, rl >= 0, rl == 0 ? 0 : spd);
+  setMotor(PIN_RR_DIR, PIN_RR_PWM, rr >= 0, rr == 0 ? 0 : spd);
+}
+
+// Named motion commands using the mecanum kinematic table
+void motorForward()  { setAllMotors(+1, +1, +1, +1, motorSpeed); }
+void motorReverse()  { setAllMotors(-1, -1, -1, -1, motorSpeed); }
+void motorLeft()     { setAllMotors(-1, +1, +1, -1, motorSpeed); }
+void motorRight()    { setAllMotors(+1, -1, -1, +1, motorSpeed); }
+void motorFwdLeft()  { setAllMotors( 0, +1, +1,  0, motorSpeed); }
+void motorFwdRight() { setAllMotors(+1,  0,  0, +1, motorSpeed); }
+void motorRevLeft()  { setAllMotors(-1,  0,  0, -1, motorSpeed); }
+void motorRevRight() { setAllMotors( 0, -1, -1,  0, motorSpeed); }
+void motorRotCW()    { setAllMotors(+1, -1, +1, -1, motorSpeed); }
+void motorRotCCW()   { setAllMotors(-1, +1, -1, +1, motorSpeed); }
+void motorStop()     { setAllMotors( 0,  0,  0,  0, 0); }
+
+// ========================== STATUS PRINTING ==========================
+
+void printFullStatus() {
+  Serial.println(F("========== ROCK CLASSIFICATION STATUS =========="));
+  
+  Serial.print(F("  Age:  "));
+  if (currentRock.ageValid) {
+    Serial.print(currentRock.age);
+    // Convert #xyz to x.yz billion years
+    if (currentRock.age[0] == '#') {
+      Serial.print(F(" → "));
+      Serial.print(currentRock.age[1]);
+      Serial.print('.');
+      Serial.print(currentRock.age[2]);
+      Serial.print(currentRock.age[3]);
+      Serial.print(F(" billion years"));
+    }
+  } else {
+    Serial.print(F("not received"));
+  }
+  Serial.println();
+  
+  Serial.print(F("  IR:   "));
+  if (currentRock.ir.valid) {
+    Serial.print(currentRock.ir.classIndex ? "HIGH (547)" : "LOW (312)");
+    Serial.print(F("  conf="));
+    Serial.print(currentRock.ir.confidence, 2);
+  } else {
+    Serial.print(F("invalid"));
+  }
+  Serial.println();
+  
+  Serial.print(F("  US:   "));
+  if (currentRock.ultrasonic.valid) {
+    Serial.print(currentRock.ultrasonic.classIndex ? "PRESENT" : "ABSENT");
+    Serial.print(F("  conf="));
+    Serial.print(currentRock.ultrasonic.confidence, 2);
+  } else {
+    Serial.print(F("invalid"));
+  }
+  Serial.println();
+  
+  Serial.print(F("  Mag:  "));
+  if (currentRock.magnetic.valid) {
+    Serial.print(currentRock.magnetic.classIndex ? "DOWN" : "UP");
+    Serial.print(F("  conf="));
+    Serial.print(currentRock.magnetic.confidence, 2);
+  } else {
+    Serial.print(F("invalid"));
+  }
+  Serial.println();
+  
+  Serial.print(F("  Type: "));
+  if (currentRock.fusionValid) {
+    Serial.print(currentRock.rockType);
+    Serial.print(F("  conf="));
+    Serial.print(currentRock.fusionConfidence, 2);
+  } else {
+    Serial.print(F("UNKNOWN"));
+  }
+  Serial.println();
+  
+  Serial.println(F("================================================"));
+}
+
+// ========================== HTTP ENDPOINTS ==========================
+
+// --- Motor command endpoint: /motor?cmd=w|s|a|d|wa|wd|sa|sd|q|e|stop&speed=N ---
+void handleMotor() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+
+  // Optional speed parameter
+  if (server.hasArg("speed")) {
+    int s = server.arg("speed").toInt();
+    if (s >= 0 && s <= 255) motorSpeed = s;
+  }
+
+  String cmd = server.hasArg("cmd") ? server.arg("cmd") : "";
+  cmd.trim();
+  cmd.toLowerCase();
+
+  bool known = true;
+
+  if (cmd == "" || cmd == "stop") {
+    motorStop();
+    cmd = "stop";
+  }
+  else if (cmd == "w") {
+    motorForward();
+  }
+  else if (cmd == "s") {
+    motorReverse();
+  }
+  else if (cmd == "a") {
+    motorLeft();
+  }
+  else if (cmd == "d") {
+    motorRight();
+  }
+  else if (cmd == "wa" || cmd == "aw") {
+    motorFwdLeft();
+  }
+  else if (cmd == "wd" || cmd == "dw") {
+    motorFwdRight();
+  }
+  else if (cmd == "sa" || cmd == "as") {
+    motorRevLeft();
+  }
+  else if (cmd == "sd" || cmd == "ds") {
+    motorRevRight();
+  }
+  else if (cmd == "q") {
+    motorRotCCW();   // rotate left
+  }
+  else if (cmd == "e") {
+    motorRotCW();    // rotate right
+  }
+  else {
+    motorStop();     // unknown sequence = safe stop
+    known = false;
+    cmd = "stop";
+  }
+
+  Serial.print(F("[MOTOR] "));
+  Serial.print(cmd);
+  Serial.print(F(" spd="));
+  Serial.print(motorSpeed);
+
+  if (!known) {
+    Serial.print(F(" (unknown command received, stopped)"));
+  }
+
+  Serial.println();
+
+  server.send(200, F("text/plain"), cmd);
+}
+
+void handleRoot() {
+  server.send(200, "text/plain", "Rover OK. Use dashboard HTML on laptop.");
+}
+
+// JSON endpoint: returns current classification state
+void handleSensor() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  String json = "{";
+  
+  // Age
+  json += "\"age\":";
+  if (currentRock.ageValid) {
+    json += "\"" + String(currentRock.age) + "\"";
+  } else {
+    json += "null";
+  }
+  
+  // IR
+  json += ",\"ir\":{\"class\":";
+  json += currentRock.ir.valid ? String(currentRock.ir.classIndex) : "null";
+  json += ",\"conf\":";
+  json += currentRock.ir.valid ? String(currentRock.ir.confidence, 2) : "null";
+  json += ",\"label\":";
+  json += currentRock.ir.valid ? 
+    (currentRock.ir.classIndex ? "\"HIGH\"" : "\"LOW\"") : "null";
+  json += "}";
+  
+  // Ultrasonic
+  json += ",\"ultrasonic\":{\"class\":";
+  json += currentRock.ultrasonic.valid ? String(currentRock.ultrasonic.classIndex) : "null";
+  json += ",\"conf\":";
+  json += currentRock.ultrasonic.valid ? String(currentRock.ultrasonic.confidence, 2) : "null";
+  json += ",\"label\":";
+  json += currentRock.ultrasonic.valid ? 
+    (currentRock.ultrasonic.classIndex ? "\"PRESENT\"" : "\"ABSENT\"") : "null";
+  json += "}";
+  
+  // Magnetic
+  json += ",\"magnetic\":{\"class\":";
+  json += currentRock.magnetic.valid ? String(currentRock.magnetic.classIndex) : "null";
+  json += ",\"conf\":";
+  json += currentRock.magnetic.valid ? String(currentRock.magnetic.confidence, 2) : "null";
+  json += ",\"label\":";
+  json += currentRock.magnetic.valid ? 
+    (currentRock.magnetic.classIndex ? "\"DOWN\"" : "\"UP\"") : "null";
+  json += "}";
+  
+  // Fusion
+  json += ",\"rockType\":";
+  json += currentRock.fusionValid ? 
+    ("\"" + String(currentRock.rockType) + "\"") : "null";
+  json += ",\"fusionConf\":";
+  json += currentRock.fusionValid ? String(currentRock.fusionConfidence, 2) : "null";
+  
+  json += "}";
+  
+  server.send(200, F("application/json"), json);
+}
+
+void handleNotFound() {
+  String message = F("File Not Found\n\nURI: ");
+  message += server.uri();
+  server.send(404, F("text/plain"), message);
+}
+
+// ========================== SETUP ==========================
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, 0);
+  
+  // Debug serial (USB)
+  Serial.begin(9600);
+  while (!Serial && millis() < 10000);  // Wait for serial monitor (remove for standalone)
+  
+  Serial.println(F("\n===================================="));
+  Serial.println(F("  EEELunarRover Classification System"));
+#if SIMULATED_MODE
+  Serial.println(F("  *** SIMULATED MODE ***"));
+#else
+  Serial.println(F("  *** HARDWARE MODE ***"));
+#endif
+  Serial.println(F("====================================\n"));
+  
+#if !SIMULATED_MODE
+  // Real hardware setup
+  Serial1.begin(600);  // UART from radio receiver on Pin 0
+  pinMode(PIN_IR_INTERRUPT, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PIN_IR_INTERRUPT), irPulseISR, RISING);
+  // Initialise BMM150 magnetometer (with graceful degradation)
+  Wire.begin();
+  const int BMM150_MAX_RETRIES = 3;
+  for (int attempt = 1; attempt <= BMM150_MAX_RETRIES; attempt++) {
+    if (bmm150.begin() == BMM150_OK) {
+      bmm150.setOperationMode(BMM150_POWERMODE_NORMAL);
+      bmm150.setPresetMode(BMM150_PRESETMODE_HIGHACCURACY);
+      bmm150.setRate(BMM150_DATA_RATE_30HZ);
+      bmm150Ready = true;
+      Serial.println(F("[MAG] BMM150 initialised OK"));
+      break;
+    }
+    Serial.print(F("[MAG] BMM150 init attempt "));
+    Serial.print(attempt);
+    Serial.print(F("/"));
+    Serial.print(BMM150_MAX_RETRIES);
+    Serial.println(F(" failed — check I2C wiring (SDA/SCL) and CS→GND"));
+    delay(500);
+  }
+  if (!bmm150Ready) {
+    Serial.println(F("[MAG] BMM150 unavailable — system continues with IR + US only"));
+  }
+#endif
+  
+  // Initialise rock data
+  memset(&currentRock, 0, sizeof(currentRock));
+  currentRock.ageValid = false;
+  currentRock.fusionValid = false;
+  
+  // Initialise motors
+  motorsInit();
+  Serial.println(F("[MOTOR] 4x mecanum motors initialised (pins are placeholders)"));
+  
+  // Seed simulation RNG
+  simSeed = micros();
+  
+  // WiFi setup (same as starter code)
+  Serial.println(F("Starting Web Server..."));
+  
+  if (WiFi.status() == WL_NO_SHIELD) {
+    Serial.println(F("WiFi shield not present"));
+    // In simulated mode, continue without WiFi for serial-only testing
+#if !SIMULATED_MODE
+    while (true);
+#else
+    Serial.println(F("Continuing without WiFi (simulated mode)"));
+#endif
+  } else {
+    if (groupNumber)
+      WiFi.config(IPAddress(192, 168, 0, groupNumber + 1));
+    
+    Serial.print(F("Connecting to WPA SSID: "));
+    Serial.println(ssid);
+    while (WiFi.begin(ssid, pass) != WL_CONNECTED) {
+      delay(500);
+      Serial.print('.');
+    }
+    
+    server.on(F("/"), handleRoot);
+    server.on(F("/sensor"), handleSensor);
+    server.on(F("/motor"), handleMotor);
+    server.onNotFound(handleNotFound);
+    server.begin();
+    
+    Serial.print(F("HTTP server started @ "));
+    Serial.println(static_cast<IPAddress>(WiFi.localIP()));
+  }
+  
+  Serial.println(F("\nSystem ready. Waiting for sensor data...\n"));
+}
+
+// ========================== MAIN LOOP (NON-BLOCKING) ==========================
+
+void loop() {
+  unsigned long now = millis();
+  
+  // 1. Handle WiFi clients
+  server.handleClient();
+  
+  // 2. Poll UART for age data
+  pollUart();
+  
+  // 3. Simulated UART injection (periodic)
+#if SIMULATED_MODE
+  if (now - lastSimUart >= SIM_UART_INTERVAL_MS) {
+    lastSimUart = now;
+    simulateUartReceive();
+  }
+#endif
+  
+  // 4. Run classification pipeline (periodic)
+  if (now - lastSensorPoll >= SENSOR_POLL_INTERVAL_MS) {
+    lastSensorPoll = now;
+    fuseAndClassify();
+  }
+  
+  // 5. Print full status (periodic)
+  if (now - lastSerialPrint >= SERIAL_PRINT_INTERVAL_MS) {
+    lastSerialPrint = now;
+    printFullStatus();
+  }
+}
