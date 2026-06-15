@@ -1,39 +1,58 @@
-# Metro M0 + WINC1500 WiFiWebServer Base
+# Metro M0 + WINC1500 WiFi Raw API Server v3.5
 
-Arduino IDE example project for:
+This version is designed for unstable phone-hotspot testing.
 
-- Adafruit Metro M0
-- Adafruit WINC1500 WiFi shield
-- khoih-prog/WiFiWebServer
+Changes from v3.4:
 
-## Setup
+- Keeps `/` tiny instead of sending the full HTML page.
+  - v3.4 could block while writing the larger page through some hotspots.
+  - If that happened, later `/api/ping` requests could not be accepted.
+- Treats unknown or malformed requests as disposable.
+  - Non-GET requests are closed immediately.
+  - Unknown paths are closed immediately.
+  - Empty/stalled clients are closed after a short timeout.
+- Uses raw `WiFiServer` / `WiFiClient`.
+- Every handled connection is force-closed with `client.stop()`.
 
-1. Open `MetroM0_WINC1500_WebBase.ino` in Arduino IDE.
-2. Install libraries:
-   - `WiFiWebServer`
-   - `WiFi101_Generic`
-   - any dependencies prompted by Library Manager
-3. Edit `Secrets.h`.
-4. Select your Metro M0 board.
-5. Upload.
-6. Open Serial Monitor at `115200`.
-7. Visit the printed IP address in your browser.
+## Edit credentials
 
-## Routes
+Edit `Secrets.h` before uploading:
 
-- `/` basic web page
-- `/api/state` JSON board state
-- `/api/led?value=1` LED on
-- `/api/led?value=0` LED off
-- `/health` simple text health check
+```cpp
+const char WIFI_SSID[] = "YOUR_WIFI_SSID";
+const char WIFI_PASS[] = "YOUR_WIFI_PASSWORD";
+```
 
-## Where to add your own logic
+## Test order
 
-Add future pin/sensor processing mainly in:
+Open only this first:
 
-- `BoardState.h`
-- `BoardState.cpp`
+```text
+http://PRINTED_IP/api/ping
+```
 
-Then expose the processed values through:
+Expected browser result:
 
-- `WebRoutes.cpp`
+```text
+pong
+```
+
+Expected Serial Monitor:
+
+```text
+HTTP client connected
+HTTP request line: GET /api/ping HTTP/1.1
+HTTP route: /api/ping
+handlePing ms: ...
+HTTP client closed ms: ...
+```
+
+Then test:
+
+```text
+http://PRINTED_IP/api/status
+http://PRINTED_IP/api/led?value=1
+http://PRINTED_IP/api/led?value=0
+```
+
+Root `/` now returns a small text message instead of the dashboard page.

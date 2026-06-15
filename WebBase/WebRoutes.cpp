@@ -1,221 +1,365 @@
 #include "AppConfig.h"
 #include "BoardState.h"
+#include "Network.h"
 #include "WebRoutes.h"
 
-/*
-  The server object is created once in the .ino file.
-
-  extern means:
-  "This variable exists somewhere else; let this file use it."
-*/
-extern WiFiWebServer server;
+extern WiFiServer server;
 
 namespace
 {
   unsigned long requestCount = 0;
 
-  /*
-    Basic HTML page.
+  const char ROOT_TEXT[] =
+      "Metro M0 raw API server v3.5\n"
+      "Use /api/ping, /api/status, /api/led?value=1, or /api/led?value=0\n";
 
-    This page uses browser JavaScript to call:
-    - GET /api/state
-    - GET /api/led?value=1
-    - GET /api/led?value=0
-
-    That gives you a base for later:
-    read pins on Arduino -> return JSON -> render on webpage.
-  */
-  const char INDEX_HTML[] =
-      "<!doctype html>"
-      "<html>"
-      "<head>"
-      "<meta charset='utf-8'>"
-      "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-      "<title>Metro M0 Web Base</title>"
-      "<style>"
-      "body{font-family:system-ui,Arial;margin:2rem;max-width:760px}"
-      ".card{border:1px solid #ccc;border-radius:12px;padding:1rem;margin:1rem 0}"
-      "button{font-size:1rem;padding:.6rem 1rem;margin-right:.5rem}"
-      "code{background:#eee;padding:.15rem .35rem;border-radius:4px}"
-      "</style>"
-      "</head>"
-      "<body>"
-      "<h1>Metro M0 + WINC1500 Web Base</h1>"
-      "<p>This page is served directly from the Adafruit Metro M0.</p>"
-
-      "<div class='card'>"
-      "<h2>LED control</h2>"
-      "<button onclick='setLed(1)'>LED on</button>"
-      "<button onclick='setLed(0)'>LED off</button>"
-      "</div>"
-
-      "<div class='card'>"
-      "<h2>Live board state</h2>"
-      "<pre id='state'>Loading...</pre>"
-      "</div>"
-
-      "<div class='card'>"
-      "<h2>Useful API routes</h2>"
-      "<p><code>/api/state</code> returns JSON.</p>"
-      "<p><code>/api/led?value=1</code> turns LED on.</p>"
-      "<p><code>/api/led?value=0</code> turns LED off.</p>"
-      "</div>"
-
-      "<script>"
-      "async function loadState(){"
-      "  const response = await fetch('/api/state');"
-      "  const data = await response.json();"
-      "  document.getElementById('state').textContent = JSON.stringify(data, null, 2);"
-      "}"
-      "async function setLed(value){"
-      "  await fetch('/api/led?value=' + value);"
-      "  await loadState();"
-      "}"
-      "loadState();"
-      "setInterval(loadState, 1000);"
-      "</script>"
-      "</body>"
-      "</html>";
-
-  void sendPlainText(int code, const __FlashStringHelper *message)
+  bool readHttpLine(WiFiClient &client, char *buffer, size_t bufferSize, unsigned long timeoutMs)
   {
-    server.send(code, F("text/plain"), message);
+    size_t length = 0;
+    const unsigned long startMs = millis();
+
+    while (millis() - startMs < timeoutMs)
+    {
+      while (client.available())
+      {
+        const char c = client.read();
+
+        if (c == '\r')
+        {
+          continue;
+        }
+
+        if (c == '\n')
+        {
+          buffer[length] = '\0';
+          return true;
+        }
+
+        if (length < bufferSize - 1)
+        {
+          buffer[length++] = c;
+        }
+      }
+
+      if (!client.connected())
+      {
+        break;
+      }
+
+      delay(1);
+    }
+
+    buffer[length] = '\0';
+    return length > 0;
   }
 
-  void handleIndex()
+  void drainHeadersBriefly(WiFiClient &client)
   {
+    char line[HTTP_REQUEST_LINE_MAX];
+
+    // For GET requests we only need the request line. Do not wait long for
+    // browser/hotspot header noise; the connection will be closed anyway.
+    while (readHttpLine(client, line, sizeof(line), 40))
+    {
+      if (line[0] == '\0')
+      {
+        return;
+      }
+    }
+  }
+
+  void sendHeaders(WiFiClient &client, int code, const char *status, const char *contentType, size_t contentLength)
+  {
+    client.print(F("HTTP/1.1 "));
+    client.print(code);
+    client.print(' ');
+    client.println(status);
+    client.print(F("Content-Type: "));
+    client.println(contentType);
+    client.print(F("Content-Length: "));
+    client.println(contentLength);
+    client.println(F("Connection: close"));
+    client.println(F("Cache-Control: no-store"));
+    client.println();
+  }
+
+  void sendText(WiFiClient &client, int code, const char *status, const char *contentType, const char *body)
+  {
+    sendHeaders(client, code, status, contentType, strlen(body));
+    client.print(body);
+  }
+
+  void sendString(WiFiClient &client, int code, const char *status, const char *contentType, const String &body)
+  {
+    sendHeaders(client, code, status, contentType, body.length());
+    client.print(body);
+  }
+
+  bool targetMatchesPath(const char *target, const char *path)
+  {
+    const size_t pathLen = strlen(path);
+
+    if (strncmp(target, path, pathLen) != 0)
+    {
+      return false;
+    }
+
+    return target[pathLen] == '\0' || target[pathLen] == '?';
+  }
+
+  bool isExpectedGetTarget(const char *target)
+  {
+    return strcmp(target, "/") == 0 ||
+           targetMatchesPath(target, "/api/ping") ||
+           targetMatchesPath(target, "/api/status") ||
+           targetMatchesPath(target, "/api/state") ||
+           targetMatchesPath(target, "/api/led") ||
+           targetMatchesPath(target, "/health") ||
+           targetMatchesPath(target, "/favicon.ico");
+  }
+
+  const char *findQueryValue(const char *target, const char *name)
+  {
+    const char *query = strchr(target, '?');
+
+    if (!query)
+    {
+      return nullptr;
+    }
+
+    query++;
+    const size_t nameLen = strlen(name);
+
+    while (*query)
+    {
+      if (strncmp(query, name, nameLen) == 0 && query[nameLen] == '=')
+      {
+        return query + nameLen + 1;
+      }
+
+      query = strchr(query, '&');
+
+      if (!query)
+      {
+        return nullptr;
+      }
+
+      query++;
+    }
+
+    return nullptr;
+  }
+
+  bool queryValueEquals(const char *value, const char *expected)
+  {
+    if (!value)
+    {
+      return false;
+    }
+
+    while (*expected && *value && *value != '&')
+    {
+      const char a = tolower(*value++);
+      const char b = tolower(*expected++);
+
+      if (a != b)
+      {
+        return false;
+      }
+    }
+
+    return *expected == '\0' && (*value == '\0' || *value == '&');
+  }
+
+  void handleRoot(WiFiClient &client)
+  {
+    // Keep root tiny. The previous full HTML page could block while writing
+    // through some phone hotspots, which then prevented later /api/ping hits.
     requestCount++;
-
-    /*
-      server.send(statusCode, contentType, body)
-
-      Django analogy:
-      This is like HttpResponse(body, content_type="text/html", status=200).
-
-      Parameters:
-      - 200: HTTP status code, meaning OK
-      - text/html: tells browser to render body as HTML
-      - INDEX_HTML: response body
-    */
-    server.send(200, F("text/html"), INDEX_HTML);
+    sendText(client, 200, "OK", "text/plain", ROOT_TEXT);
   }
 
-  void handleApiState()
+  void handlePing(WiFiClient &client)
   {
+    const unsigned long startMs = millis();
+    requestCount++;
+    sendText(client, 200, "OK", "text/plain", "pong\n");
+
+    Serial.print(F("handlePing ms: "));
+    Serial.println(millis() - startMs);
+  }
+
+  void handleStatus(WiFiClient &client)
+  {
+    const unsigned long startMs = millis();
     requestCount++;
 
     BoardSnapshot snapshot = readBoardSnapshot();
-    String json = boardSnapshotToJson(snapshot, requestCount);
+    String json = boardStatusToJson(snapshot, requestCount);
+    json += '\n';
 
-    server.send(200, F("application/json"), json);
+    sendString(client, 200, "OK", "application/json", json);
+
+    Serial.print(F("handleStatus ms: "));
+    Serial.println(millis() - startMs);
   }
 
-  void handleLed()
+  void handleState(WiFiClient &client)
   {
+    const unsigned long startMs = millis();
     requestCount++;
 
-    /*
-      Query string example:
-      /api/led?value=1
+    BoardSnapshot snapshot = readBoardSnapshot();
+    String json = boardFullStateToJson(snapshot, requestCount);
+    json += '\n';
 
-      server.hasArg("value")
-      - true if the URL contains a query parameter named value
+    sendString(client, 200, "OK", "application/json", json);
 
-      server.arg("value")
-      - returns the string value of that query parameter
-    */
-    if (!server.hasArg("value"))
+    Serial.print(F("handleState ms: "));
+    Serial.println(millis() - startMs);
+  }
+
+  void handleLed(WiFiClient &client, const char *target)
+  {
+    const unsigned long startMs = millis();
+    requestCount++;
+
+    const char *value = findQueryValue(target, "value");
+
+    if (!value)
     {
-      sendPlainText(400, F("Missing query parameter: value. Use /api/led?value=1 or /api/led?value=0"));
+      sendText(client, 400, "Bad Request", "text/plain", "Missing query parameter: value. Use /api/led?value=1 or /api/led?value=0\n");
       return;
     }
 
-    String value = server.arg("value");
-    value.toLowerCase();
-
-    if (value == "1" || value == "true" || value == "on")
+    if (queryValueEquals(value, "1") || queryValueEquals(value, "true") || queryValueEquals(value, "on"))
     {
       setLedState(true);
     }
-    else if (value == "0" || value == "false" || value == "off")
+    else if (queryValueEquals(value, "0") || queryValueEquals(value, "false") || queryValueEquals(value, "off"))
     {
       setLedState(false);
     }
     else
     {
-      sendPlainText(400, F("Invalid value. Use 1, 0, true, false, on, or off."));
+      sendText(client, 400, "Bad Request", "text/plain", "Invalid value. Use 1, 0, true, false, on, or off.\n");
       return;
     }
 
-    BoardSnapshot snapshot = readBoardSnapshot();
-    String json = boardSnapshotToJson(snapshot, requestCount);
+    String json = boardLedToJson();
+    json += '\n';
+    sendString(client, 200, "OK", "application/json", json);
 
-    server.send(200, F("application/json"), json);
+    Serial.print(F("handleLed ms: "));
+    Serial.println(millis() - startMs);
   }
 
-  void handleHealth()
+  void skipUnexpectedRequest(const char *reason, const char *detail = nullptr)
   {
-    requestCount++;
-    sendPlainText(200, F("ok"));
-  }
+    Serial.print(F("Skipping unexpected request: "));
+    Serial.print(reason);
 
-  void handleNotFound()
-  {
-    requestCount++;
-
-    /*
-      Useful debug response.
-
-      When you mistype a URL, this shows:
-      - requested URI
-      - method
-      - query arguments
-
-      This is helpful while developing APIs from the browser.
-    */
-    String message;
-
-    message += F("404 Not Found\n\n");
-    message += F("URI: ");
-    message += server.uri();
-    message += F("\nMethod: ");
-    message += (server.method() == HTTP_GET) ? F("GET") : F("POST");
-    message += F("\nArguments: ");
-    message += server.args();
-    message += F("\n");
-
-    for (uint8_t i = 0; i < server.args(); i++)
+    if (detail && detail[0] != '\0')
     {
-      message += F("  ");
-      message += server.argName(i);
-      message += F(": ");
-      message += server.arg(i);
-      message += F("\n");
+      Serial.print(F(" | "));
+      Serial.print(detail);
     }
 
-    server.send(404, F("text/plain"), message);
+    Serial.println();
   }
 }
 
-void configureWebRoutes()
+void handleHttpClient()
 {
-  /*
-    server.on(path, handler)
+  WiFiClient client = server.available();
 
-    Django analogy:
-    path("/", views.index)
-    path("/api/state", views.state)
+  if (!client)
+  {
+    return;
+  }
 
-    The handler function runs when a browser requests that path.
-  */
-  server.on(F("/"), handleIndex);
-  server.on(F("/api/state"), handleApiState);
-  server.on(F("/api/led"), handleLed);
-  server.on(F("/health"), handleHealth);
+  const unsigned long requestStartMs = millis();
+  Serial.println(F("HTTP client connected"));
 
-  /*
-    Fallback route.
-    Runs when no registered route matches.
-  */
-  server.onNotFound(handleNotFound);
+  char requestLine[HTTP_REQUEST_LINE_MAX];
+
+  if (!readHttpLine(client, requestLine, sizeof(requestLine), HTTP_CLIENT_TIMEOUT_MS))
+  {
+    Serial.println(F("Empty/stalled client; closing."));
+    client.stop();
+    return;
+  }
+
+  Serial.print(F("HTTP request line: "));
+  Serial.println(requestLine);
+
+  char method[8] = {0};
+  char target[HTTP_TARGET_MAX] = {0};
+
+  if (sscanf(requestLine, "%7s %63s", method, target) != 2)
+  {
+    skipUnexpectedRequest("malformed request line", requestLine);
+    client.stop();
+    return;
+  }
+
+  Serial.print(F("HTTP route: "));
+  Serial.println(target);
+
+  if (strcmp(method, "GET") != 0)
+  {
+    skipUnexpectedRequest("non-GET method", method);
+    client.stop();
+    return;
+  }
+
+  if (!isExpectedGetTarget(target))
+  {
+    skipUnexpectedRequest("unknown path", target);
+    client.stop();
+    return;
+  }
+
+  drainHeadersBriefly(client);
+
+  if (strcmp(target, "/") == 0)
+  {
+    handleRoot(client);
+  }
+  else if (targetMatchesPath(target, "/api/ping"))
+  {
+    handlePing(client);
+  }
+  else if (targetMatchesPath(target, "/api/status"))
+  {
+    handleStatus(client);
+  }
+  else if (targetMatchesPath(target, "/api/state"))
+  {
+    handleState(client);
+  }
+  else if (targetMatchesPath(target, "/api/led"))
+  {
+    handleLed(client, target);
+  }
+  else if (targetMatchesPath(target, "/health"))
+  {
+    requestCount++;
+    sendText(client, 200, "OK", "text/plain", "ok\n");
+  }
+  else if (targetMatchesPath(target, "/favicon.ico"))
+  {
+    requestCount++;
+    sendHeaders(client, 204, "No Content", "text/plain", 0);
+  }
+  else
+  {
+    skipUnexpectedRequest("unexpected fallthrough", target);
+  }
+
+  delay(1);
+  client.stop();
+
+  Serial.print(F("HTTP client closed ms: "));
+  Serial.println(millis() - requestStartMs);
 }

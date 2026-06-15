@@ -1,29 +1,34 @@
-#include "AppConfig.h"
-#include "Secrets.h"
 #include "Network.h"
+#include "Secrets.h"
+
+extern WiFiServer server;
 
 namespace
 {
-  /*
-    File-local variable.
-
-    `namespace { ... }` in C++ makes this variable private to Network.cpp.
-    This avoids accidental name conflicts with other files.
-  */
   unsigned long lastWiFiMaintainMs = 0;
+  const unsigned long WIFI_CONNECT_TIMEOUT_MS = 30000;
+}
+
+String ipAddressToString(const IPAddress &ip)
+{
+  return String(ip[0]) + "." +
+         String(ip[1]) + "." +
+         String(ip[2]) + "." +
+         String(ip[3]);
+}
+
+void printWiFiStatus()
+{
+  Serial.print(F("IP address: "));
+  Serial.println(ipAddressToString(WiFi.localIP()));
+
+  Serial.print(F("Signal strength RSSI: "));
+  Serial.print(WiFi.RSSI());
+  Serial.println(F(" dBm"));
 }
 
 void connectToWiFiBlocking()
 {
-  /*
-    WiFi.status()
-
-    Returns the current WiFi state.
-    Important states:
-    - WL_CONNECTED: successfully connected to router
-    - WL_NO_SHIELD: WiFi shield not detected
-    - WL_IDLE_STATUS: not connected yet / idle
-  */
   if (WiFi.status() == WL_NO_SHIELD)
   {
     Serial.println(F("ERROR: WINC1500/WiFi101 shield not detected."));
@@ -40,18 +45,8 @@ void connectToWiFiBlocking()
   Serial.print(F("Connecting to WiFi SSID: "));
   Serial.println(WIFI_SSID);
 
-  /*
-    WiFi.begin(ssid, password)
-
-    Parameters:
-    - ssid: WiFi network name
-    - password: WPA/WPA2 password
-
-    Principle:
-    This asks the WINC1500 module to join your router's network.
-    Your Metro M0 does not directly speak WiFi; it talks to the WINC1500 over SPI.
-  */
   int status = WL_IDLE_STATUS;
+  const unsigned long connectStartMs = millis();
 
   while (status != WL_CONNECTED)
   {
@@ -59,6 +54,17 @@ void connectToWiFiBlocking()
 
     Serial.print(F("."));
     delay(1000);
+
+    if (millis() - connectStartMs > WIFI_CONNECT_TIMEOUT_MS)
+    {
+      Serial.println();
+      Serial.println(F("ERROR: WiFi connection timed out."));
+      Serial.println(F("Check SSID/password, hotspot visibility, and 2.4 GHz compatibility."));
+      while (true)
+      {
+        delay(1000);
+      }
+    }
   }
 
   Serial.println();
@@ -68,12 +74,6 @@ void connectToWiFiBlocking()
 
 void maintainWiFi()
 {
-  /*
-    Non-blocking periodic check.
-
-    millis() is the number of milliseconds since boot.
-    Unlike delay(), this lets loop() keep running and lets the server stay responsive.
-  */
   const unsigned long now = millis();
 
   if (now - lastWiFiMaintainMs < WIFI_MAINTAIN_INTERVAL_MS)
@@ -83,19 +83,26 @@ void maintainWiFi()
 
   lastWiFiMaintainMs = now;
 
-  if (WiFi.status() != WL_CONNECTED)
+  if (WiFi.status() == WL_CONNECTED)
   {
-    Serial.println(F("WiFi disconnected. Reconnecting..."));
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    return;
   }
-}
 
-void printWiFiStatus()
-{
-  Serial.print(F("IP address: "));
-  Serial.println(WiFi.localIP());
+  Serial.println(F("WiFi disconnected. Reconnecting..."));
 
-  Serial.print(F("Signal strength RSSI: "));
-  Serial.print(WiFi.RSSI());
-  Serial.println(F(" dBm"));
+  const int status = WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  if (status == WL_CONNECTED)
+  {
+    Serial.println(F("WiFi reconnected."));
+    printWiFiStatus();
+
+    server.begin();
+    Serial.println(F("Raw HTTP server restarted."));
+  }
+  else
+  {
+    Serial.print(F("Reconnect status: "));
+    Serial.println(status);
+  }
 }

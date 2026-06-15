@@ -1,16 +1,8 @@
 #pragma once
 
-/*
-  Network.h
+#include "AppConfig.h"
 
-  Functions responsible for WiFi connection.
-
-  Keeping WiFi logic separate from web-route logic makes it easier to later add:
-  - reconnect handling
-  - static IP
-  - mDNS
-  - WiFi status page
-*/
+String ipAddressToString(const IPAddress &ip);
 
 void connectToWiFiBlocking();
 void maintainWiFi();

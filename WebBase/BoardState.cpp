@@ -1,4 +1,5 @@
 #include "BoardState.h"
+#include "Network.h"
 
 namespace
 {
@@ -55,7 +56,6 @@ void setLedState(bool on)
   digitalWrite(LED_PIN, ledIsOn ? HIGH : LOW);
 }
 
-// update snapshot
 BoardSnapshot readBoardSnapshot()
 {
   BoardSnapshot snapshot;
@@ -87,20 +87,16 @@ BoardSnapshot readBoardSnapshot()
   return snapshot;
 }
 
-String boardSnapshotToJson(const BoardSnapshot &snapshot, unsigned long requestCount)
+String boardFullStateToJson(const BoardSnapshot &snapshot, unsigned long requestCount)
 {
   /*
-    JSON response.
+    Full JSON response.
 
-    Django analogy:
-    This is similar to returning JsonResponse({...}).
-
-    We build JSON manually to avoid adding another dependency like ArduinoJson.
-    Keep JSON small on microcontrollers.
+    This includes LED state and general board status.
+    It is kept for backwards compatibility at /api/state.
   */
-  String ipText = snapshot.ip.toString();
-
   String json = "{";
+
   json += "\"led_on\":";
   json += snapshot.ledOn ? "true" : "false";
 
@@ -117,12 +113,63 @@ String boardSnapshotToJson(const BoardSnapshot &snapshot, unsigned long requestC
   json += snapshot.wifiRssi;
 
   json += ",\"ip\":\"";
-  json += ipText;
+  json += ipAddressToString(snapshot.ip);
   json += "\"";
 
   json += ",\"request_count\":";
   json += requestCount;
 
+  json += "}";
+
+  return json;
+}
+
+String boardStatusToJson(const BoardSnapshot &snapshot, unsigned long requestCount)
+{
+  /*
+    Status-only JSON response.
+
+    This intentionally excludes LED state.
+    The webpage polls this periodically so that normal live updates do not
+    constantly touch or refresh the LED control state.
+  */
+  String json = "{";
+
+  json += "\"analog_a0\":";
+  json += snapshot.analogA0;
+
+  json += ",\"digital_d5\":";
+  json += snapshot.digitalD5;
+
+  json += ",\"uptime_ms\":";
+  json += snapshot.uptimeMs;
+
+  json += ",\"wifi_rssi\":";
+  json += snapshot.wifiRssi;
+
+  json += ",\"ip\":\"";
+  json += ipAddressToString(snapshot.ip);
+  json += "\"";
+
+  json += ",\"request_count\":";
+  json += requestCount;
+
+  json += "}";
+
+  return json;
+}
+
+String boardLedToJson()
+{
+  /*
+    LED-only JSON response.
+
+    This is returned by /api/led after a button press.
+    It is small and fast, so LED commands feel more reliable.
+  */
+  String json = "{";
+  json += "\"led_on\":";
+  json += getLedState() ? "true" : "false";
   json += "}";
 
   return json;
