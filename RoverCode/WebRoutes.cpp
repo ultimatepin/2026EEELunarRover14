@@ -24,7 +24,7 @@ namespace
   const char ROOT_TEXT[] =
       "EEELunarRover raw WiFi production build\n"
       "Open /dashboard for WASD controls.\n"
-      "Test /api/ping first.\n";
+      "Radio debug: /radio. Test /api/ping first.\n";
 
   const char DASHBOARD_HTML[] = R"HTML(<!doctype html>
 <html>
@@ -60,6 +60,7 @@ namespace
       <div class="label">Rock</div><div id="rock">--</div>
       <div class="label">Confidence</div><div id="fusion">--</div>
       <div class="label">Age</div><div id="age">--</div>
+      <div class="label">Radio</div><div id="radio">--</div>
       <div class="label">IR</div><div id="ir">--</div>
       <div class="label">Ultrasonic</div><div id="us">--</div>
       <div class="label">Magnetic</div><div id="mag">--</div>
@@ -70,6 +71,7 @@ namespace
       <button onclick="ping()">Ping</button>
       <button onclick="loadSensor()">Refresh sensor</button>
       <button onclick="loadDebug()">Debug</button>
+      <button onclick="loadRadio()">Radio</button>
       <button onclick="loadI2c()">I2C</button>
       <button onclick="sendMotor('w','test forward');setTimeout(function(){sendMotor('stop','test auto-stop');},350)">Motor test</button>
       <span id="conn" class="footer">not tested</span>
@@ -174,12 +176,13 @@ window.addEventListener('beforeunload',function(){sendMotor('stop','page unload'
 function fmtConf(v){return v==null?'--':Math.round(v*100)+'%';}
 function showSensor(t){
   setText('rawOut',t);
-  try{const j=JSON.parse(t);setText('rock',j.rockType||'UNKNOWN');setText('fusion',fmtConf(j.fusionConf));setText('age',j.age||'--');setText('ir',(j.ir&&j.ir.label)||'--');setText('us',(j.ultrasonic&&j.ultrasonic.label)||'--');setText('mag',(j.magnetic&&j.magnetic.label)||'--');}
+  try{const j=JSON.parse(t);setText('rock',j.rockType||'UNKNOWN');setText('fusion',fmtConf(j.fusionConf));setText('age',j.age||'--');setText('ir',(j.ir&&j.ir.label)||'--');setText('us',(j.ultrasonic&&j.ultrasonic.label)||'--');setText('mag',(j.magnetic&&j.magnetic.label)||'--');if(j.radio){setText('radio','bytes '+j.radio.bytes+' | valid '+j.radio.valid_packets+' | last '+(j.radio.last_byte_age_ms==null?'--':j.radio.last_byte_age_ms+'ms'));}}
   catch(e){setText('rawOut','sensor parse failed: '+e+'\n'+t);}
 }
 function ping(){req('/api/ping?_t='+Date.now(),function(s,t){setText('conn',s===200?'online':'failed: '+t);setClass('conn',s===200?'ok':'bad');});}
 function loadSensor(){req('/sensor?_t='+Date.now(),function(s,t){if(s===200)showSensor(t);else setText('rawOut','sensor failed: '+t);});}
 function loadDebug(){req('/debug?_t='+Date.now(),function(s,t){setText('rawOut',t);});}
+function loadRadio(){req('/radio?_t='+Date.now(),function(s,t){setText('rawOut',t);});}
 function loadI2c(){req('/i2cscan?_t='+Date.now(),function(s,t){setText('rawOut',t);});}
 refreshUi();ping();loadSensor();setInterval(loadSensor,1500);document.body.focus();
 </script>
@@ -318,6 +321,7 @@ refreshUi();ping();loadSensor();setInterval(loadSensor,1500);document.body.focus
            targetMatchesPath(target, "/api/state") ||
            targetMatchesPath(target, "/sensor") ||
            targetMatchesPath(target, "/debug") ||
+           targetMatchesPath(target, "/radio") ||
            targetMatchesPath(target, "/i2cscan") ||
            targetMatchesPath(target, "/motor") ||
            targetMatchesPath(target, "/health") ||
@@ -406,6 +410,14 @@ refreshUi();ping();loadSensor();setInterval(loadSensor,1500);document.body.focus
   {
     requestCount++;
     String json = roverDebugJson();
+    json += '\n';
+    sendString(client, 200, "OK", "application/json", json);
+  }
+
+  void handleRadio(WiFiClient &client)
+  {
+    requestCount++;
+    String json = roverRadioJson();
     json += '\n';
     sendString(client, 200, "OK", "application/json", json);
   }
@@ -523,6 +535,7 @@ void handleHttpClient()
   else if (targetMatchesPath(target, "/api/status") || targetMatchesPath(target, "/api/state")) handleStatus(client);
   else if (targetMatchesPath(target, "/sensor")) handleSensor(client);
   else if (targetMatchesPath(target, "/debug")) handleDebug(client);
+  else if (targetMatchesPath(target, "/radio")) handleRadio(client);
   else if (targetMatchesPath(target, "/i2cscan")) handleI2cScan(client);
   else if (targetMatchesPath(target, "/motor")) handleMotor(client, target);
   else if (targetMatchesPath(target, "/health"))

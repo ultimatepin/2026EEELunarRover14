@@ -22,6 +22,17 @@ namespace
   int uartBufferIdx = 0;
   bool uartReceiving = false;
 
+  // Radio/UART diagnostics. These are exposed in /radio, /debug, and /sensor.
+  char plainUartDigits[4];
+  int plainUartDigitIdx = 0;
+  unsigned long radioByteCount = 0;
+  unsigned long radioValidPackets = 0;
+  unsigned long radioInvalidPackets = 0;
+  unsigned long radioLastByteMs = 0;
+  unsigned long radioLastValidPacketMs = 0;
+  uint8_t radioLastByte = 0;
+  char radioLastPacket[5] = "#---";
+
   unsigned long lastSensorPoll = 0;
   unsigned long lastSerialPrint = 0;
   unsigned long lastSimUart = 0;
@@ -120,57 +131,131 @@ namespace
   }
 #endif
 
-  // ========================== UART AGE DECODING ==========================
+  // ========================== UART / RADIO AGE DECODING ==========================
+
+  bool isDigitChar(char c)
+  {
+    return c >= '0' && c <= '9';
+  }
+
+  void resetHashPacket()
+  {
+    uartReceiving = false;
+    uartBufferIdx = 0;
+    uartBuffer[0] = '\0';
+  }
+
+  void resetPlainPacket()
+  {
+    plainUartDigitIdx = 0;
+    plainUartDigits[0] = '\0';
+  }
+
+  void acceptRadioPacket(const char *packet)
+  {
+    copyText(currentRock.age, sizeof(currentRock.age), packet);
+    copyText(radioLastPacket, sizeof(radioLastPacket), packet);
+    currentRock.ageValid = true;
+    radioValidPackets++;
+    radioLastValidPacketMs = millis();
+
+    if (serialDebugEnabled())
+    {
+      Serial.print(F("[RADIO] Age received: "));
+      Serial.println(currentRock.age);
+    }
+  }
+
+  void rejectRadioPacket(const __FlashStringHelper *reason)
+  {
+    radioInvalidPackets++;
+    if (serialDebugEnabled())
+    {
+      Serial.print(F("[RADIO] Invalid/partial packet discarded: "));
+      Serial.println(reason);
+    }
+  }
+
+  void acceptPlainDigitPacketIfComplete()
+  {
+    if (!RADIO_ACCEPT_PLAIN_3_DIGIT_AGE || plainUartDigitIdx < 3)
+    {
+      return;
+    }
+
+    char normalized[5];
+    normalized[0] = '#';
+    normalized[1] = plainUartDigits[0];
+    normalized[2] = plainUartDigits[1];
+    normalized[3] = plainUartDigits[2];
+    normalized[4] = '\0';
+    acceptRadioPacket(normalized);
+    resetPlainPacket();
+  }
 
   void processUartByte(char c)
   {
+    // Treat whitespace as a separator. If it arrives mid-packet, the packet was incomplete.
+    if (c == '\r' || c == '\n' || c == ' ' || c == '\t')
+    {
+      if (uartReceiving && uartBufferIdx > 1)
+      {
+        rejectRadioPacket(F("separator before #ddd completed"));
+      }
+      if (plainUartDigitIdx > 0)
+      {
+        rejectRadioPacket(F("separator before plain ddd completed"));
+      }
+      resetHashPacket();
+      resetPlainPacket();
+      return;
+    }
+
     if (c == '#')
     {
+      resetPlainPacket();
       uartBuffer[0] = '#';
       uartBufferIdx = 1;
       uartReceiving = true;
       return;
     }
 
-    if (!uartReceiving)
+    if (uartReceiving)
     {
+      if (!isDigitChar(c))
+      {
+        rejectRadioPacket(F("non-digit after #"));
+        resetHashPacket();
+        return;
+      }
+
+      if (uartBufferIdx < 4)
+      {
+        uartBuffer[uartBufferIdx++] = c;
+      }
+
+      if (uartBufferIdx >= 4)
+      {
+        uartBuffer[4] = '\0';
+        acceptRadioPacket(uartBuffer);
+        resetHashPacket();
+      }
       return;
     }
 
-    if (uartBufferIdx < (int)sizeof(uartBuffer) - 1)
+    // Extra tolerance: if the transmitter sends 123 instead of #123, accept it.
+    if (RADIO_ACCEPT_PLAIN_3_DIGIT_AGE && isDigitChar(c))
     {
-      uartBuffer[uartBufferIdx++] = c;
+      if (plainUartDigitIdx < 3)
+      {
+        plainUartDigits[plainUartDigitIdx++] = c;
+        plainUartDigits[plainUartDigitIdx] = '\0';
+      }
+      acceptPlainDigitPacketIfComplete();
+      return;
     }
 
-    if (uartBufferIdx >= 4)
-    {
-      uartBuffer[4] = '\0';
-
-      bool valid = true;
-      for (int i = 1; i < 4; i++)
-      {
-        if (uartBuffer[i] < '0' || uartBuffer[i] > '9')
-        {
-          valid = false;
-          break;
-        }
-      }
-
-      if (valid)
-      {
-        copyText(currentRock.age, sizeof(currentRock.age), uartBuffer);
-        currentRock.ageValid = true;
-        Serial.print(F("[UART] Age received: "));
-        Serial.println(currentRock.age);
-      }
-      else
-      {
-        Serial.println(F("[UART] Invalid age string discarded"));
-      }
-
-      uartReceiving = false;
-      uartBufferIdx = 0;
-    }
+    resetPlainPacket();
   }
 
 #if ROVER_SIMULATED_MODE
@@ -197,7 +282,27 @@ namespace
 #else
     while (Serial1.available())
     {
-      processUartByte((char)Serial1.read());
+      const uint8_t raw = (uint8_t)Serial1.read();
+      const char c = (char)raw;
+
+      radioByteCount++;
+      radioLastByte = raw;
+      radioLastByteMs = millis();
+
+      if (RADIO_RAW_SERIAL_DEBUG && serialDebugEnabled())
+      {
+        Serial.print(F("[RADIO RAW] dec="));
+        Serial.print(raw);
+        Serial.print(F(" hex=0x"));
+        if (raw < 16) Serial.print('0');
+        Serial.print(raw, HEX);
+        Serial.print(F(" char='"));
+        if (raw >= 32 && raw <= 126) Serial.print((char)raw);
+        else Serial.print('.');
+        Serial.println(F("'"));
+      }
+
+      processUartByte(c);
     }
 #endif
   }
@@ -562,6 +667,7 @@ namespace
   {
     Serial.println(F("[PIN] Active rover pin map:"));
     Serial.print(F("[PIN] IR interrupt = ")); Serial.println(PIN_IR_INTERRUPT);
+    Serial.print(F("[PIN] Radio RX     = D")); Serial.print(PIN_RADIO_RX); Serial.print(F(" @ ")); Serial.print(RADIO_BAUD); Serial.println(F(" baud"));
     Serial.print(F("[PIN] Ultrasonic   = ")); Serial.println(PIN_ULTRASONIC);
     Serial.print(F("[PIN] FL DIR/PWM   = ")); Serial.print(PIN_FL_DIR); Serial.print('/'); Serial.println(PIN_FL_PWM);
     Serial.print(F("[PIN] FR DIR/PWM   = ")); Serial.print(PIN_FR_DIR); Serial.print('/'); Serial.println(PIN_FR_PWM);
@@ -608,7 +714,16 @@ void setupRoverHardware()
   currentRock.fusionValid = false;
 
 #if !ROVER_SIMULATED_MODE
-  Serial1.begin(600);
+  Serial1.begin(RADIO_BAUD);
+  if (serialDebugEnabled())
+  {
+    Serial.print(F("[RADIO] Serial1 RX active on D"));
+    Serial.print(PIN_RADIO_RX);
+    Serial.print(F(" at "));
+    Serial.print(RADIO_BAUD);
+    Serial.println(F(" baud"));
+    Serial.println(F("[RADIO] Accepting #ddd and plain ddd age packets"));
+  }
   pinMode(PIN_ULTRASONIC, INPUT);
   pinMode(PIN_IR_INTERRUPT, INPUT);
   attachInterrupt(digitalPinToInterrupt(PIN_IR_INTERRUPT), irPulseISR, RISING);
@@ -783,6 +898,8 @@ String roverSensorJson()
   json += currentRock.fusionValid ? ("\"" + String(currentRock.rockType) + "\"") : "null";
   json += ",\"fusionConf\":";
   json += currentRock.fusionValid ? String(currentRock.fusionConfidence, 3) : "null";
+  json += ",\"radio\":";
+  json += roverRadioJson();
   json += "}";
 
   return json;
@@ -795,6 +912,50 @@ String roverMotorJson()
   json += lastMotorCmd;
   json += "\",\"speed\":";
   json += motorSpeed;
+  json += "}";
+  return json;
+}
+
+String roverRadioJson()
+{
+  String json = "{";
+  json += "\"rx_pin\":";
+  json += PIN_RADIO_RX;
+  json += ",\"baud\":";
+  json += RADIO_BAUD;
+  json += ",\"accept_plain_ddd\":";
+  json += RADIO_ACCEPT_PLAIN_3_DIGIT_AGE ? "true" : "false";
+  json += ",\"raw_serial_debug\":";
+  json += RADIO_RAW_SERIAL_DEBUG ? "true" : "false";
+  json += ",\"bytes\":";
+  json += radioByteCount;
+  json += ",\"valid_packets\":";
+  json += radioValidPackets;
+  json += ",\"invalid_packets\":";
+  json += radioInvalidPackets;
+  json += ",\"last_byte_age_ms\":";
+  json += radioByteCount > 0 ? String(millis() - radioLastByteMs) : "null";
+  json += ",\"last_valid_packet_age_ms\":";
+  json += radioValidPackets > 0 ? String(millis() - radioLastValidPacketMs) : "null";
+  json += ",\"last_byte_dec\":";
+  json += radioByteCount > 0 ? String(radioLastByte) : "null";
+  json += ",\"last_byte_hex\":";
+  if (radioByteCount > 0)
+  {
+    json += "\"0x";
+    if (radioLastByte < 16) json += '0';
+    json += String(radioLastByte, HEX);
+    json += "\"";
+  }
+  else
+  {
+    json += "null";
+  }
+  json += ",\"last_packet\":\"";
+  json += radioLastPacket;
+  json += "\"";
+  json += ",\"age\":";
+  json += currentRock.ageValid ? ("\"" + String(currentRock.age) + "\"") : "null";
   json += "}";
   return json;
 }
@@ -827,6 +988,8 @@ String roverDebugJson()
   json += ",\"rr_pwm\":"; json += PIN_RR_PWM;
   json += "},\"motor\":";
   json += roverMotorJson();
+  json += ",\"radio\":";
+  json += roverRadioJson();
   json += "}";
   return json;
 }

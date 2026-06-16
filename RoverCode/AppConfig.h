@@ -27,6 +27,14 @@ const unsigned long SERIAL_BAUD = 115200;
 const unsigned long SERIAL_WAIT_MS = 1200;
 const uint16_t HTTP_PORT = 80;
 
+// Radio age receiver: Metro M0 hardware UART RX is D0.
+// Expected packet is #ddd, e.g. #123. This patched build also accepts plain ddd
+// and normalises it to #ddd so the dashboard age field still works.
+const uint8_t PIN_RADIO_RX = 0;
+const unsigned long RADIO_BAUD = 600;
+const bool RADIO_ACCEPT_PLAIN_3_DIGIT_AGE = true;
+const bool RADIO_RAW_SERIAL_DEBUG = true; // Set false after debugging to reduce Serial Monitor spam.
+
 #define SHIELD_TYPE "Adafruit WINC1500 Shield using WiFi101_Generic"
 #define BOARD_NAME "Adafruit Metro M0"
 
@@ -52,7 +60,7 @@ const uint8_t PIN_IR_INTERRUPT = 9;   // IR pulse input, interrupt-capable.
 // Metro M0 D1 is also Serial1 TX; keep this only if your wiring/testing confirms
 // that the ultrasonic detector works on D1 in your rover setup.
 const uint8_t PIN_ULTRASONIC   = 1;   // Digital 40 kHz detector input, original D1 wiring.
-// Serial1 RX on D0 receives radio age strings at 600 bps.
+// Serial1 RX on D0 receives radio age strings at RADIO_BAUD.
 // BMM150 uses I2C: SDA/SCL on the Metro M0 Wire pins.
 
 // Motor driver pins from the prototype. Confirm against the physical wiring.
