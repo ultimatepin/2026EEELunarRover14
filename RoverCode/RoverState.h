@@ -53,4 +53,5 @@ void applyMotorCommand(const char *cmd, int requestedSpeed, char *normalizedCmd,
 String roverSensorJson();
 String roverMotorJson();
 String roverDebugJson();
+String roverI2cScanJson();
 void printFullRoverStatus();

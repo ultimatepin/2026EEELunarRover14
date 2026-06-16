@@ -1,23 +1,51 @@
-# EEELunarRover Raw WiFi Integrated
+# EEELunarRover Raw WiFi Production
 
-This refactor keeps the stable annotated WINC1500 networking base and integrates the prototype rover logic into clean modules.
+This is the production dashboard build based on the working standalone raw-WiFi version.
 
-## What changed
+## Main control behavior
 
-- Replaced `WiFiWebServer` with the annotated raw `WiFiServer` / `WiFiClient` request lifecycle.
-- Added `/dashboard`, `/sensor`, `/debug`, `/motor`, `/api/ping`, `/api/status`, `/health` routes.
-- Preserved prototype logic for:
-  - UART age parsing on `Serial1` at 600 bps,
-  - IR Poisson log-likelihood classification,
-  - ultrasonic present/absent classification,
-  - BMM150 Z-axis polarity classification,
-  - 2-of-3 / 3-of-3 rock fusion,
-  - 4-wheel mecanum motor commands.
-- Added a motor watchdog: if the dashboard stops sending keepalive commands, the rover stops after `MOTOR_COMMAND_TIMEOUT_MS`.
+Open `/dashboard`, click/tap the page once, then drive with the keyboard.
+
+| Key | Command | Action |
+|---|---|---|
+| `W` / Arrow Up | `w` | Forward |
+| `S` / Arrow Down | `s` | Reverse |
+| `A` / Arrow Left | `a` | Strafe left |
+| `D` / Arrow Right | `d` | Strafe right |
+| `W+A` | `wa` | Forward-left |
+| `W+D` | `wd` | Forward-right |
+| `S+A` | `sa` | Reverse-left |
+| `S+D` | `sd` | Reverse-right |
+| `Q` | `q` | Rotate counterclockwise |
+| `E` | `e` | Rotate clockwise |
+| `Z` | speed toggle | Switch PWM between `110` and `255` |
+| key release | recalculated command / stop | Releasing the final movement key sends `stop` immediately |
+
+The old PWM slider has been removed. The dashboard now has exactly two speed values:
+
+```text
+110 = controlled / low speed
+255 = full speed
+```
+
+If you press `Z` while moving, the dashboard immediately resends the current movement command with the new speed.
+
+## Safety behavior
+
+The rover sends `stop` when:
+
+- the last movement key is released,
+- the browser tab loses focus,
+- the tab becomes hidden,
+- the page is closed/refreshed,
+- Emergency Stop is pressed,
+- or the firmware motor watchdog stops receiving keepalive commands.
+
+A 600 ms keepalive is sent while moving. The firmware watchdog is still the final backup.
 
 ## Upload steps
 
-1. Open `EEELunarRover_RawWiFi_Integrated_debugged.ino` in Arduino IDE.
+1. Open `EEELunarRover_RawWiFi_Production.ino` in Arduino IDE.
 2. Install libraries:
    - `WiFi101_Generic`
    - `DFRobot_BMM150`
@@ -28,44 +56,48 @@ const char WIFI_SSID[] = "YOUR_WIFI_SSID";
 const char WIFI_PASS[] = "YOUR_WIFI_PASSWORD";
 ```
 
-4. Confirm pins in `AppConfig.h`, especially motor driver pins and `PIN_ULTRASONIC`.
-5. Upload to Adafruit Metro M0 Express.
-6. Open Serial Monitor at `115200` and use the printed dashboard URL.
+4. Confirm your physical pins in `AppConfig.h`.
+5. Upload to the Adafruit Metro M0 Express.
+6. Open Serial Monitor at `115200` for the printed IP address.
+7. Test in this order:
+
+```text
+http://PRINTED_IP/api/ping
+http://PRINTED_IP/dashboard
+```
 
 ## Routes
 
 | Route | Purpose |
 |---|---|
-| `/dashboard` | Small diagnostic rover dashboard |
+| `/dashboard` | Production WASD dashboard |
 | `/sensor` | Current rock classification JSON |
 | `/debug` | Pin map, BMM150 ready state, simulated-mode flag, motor state |
-| `/motor?cmd=w&speed=180` | Motor command endpoint |
+| `/i2cscan` | I2C device scan |
+| `/motor?cmd=w&speed=110` | Motor command endpoint |
 | `/motor?cmd=stop` | Stop all motors |
 | `/api/ping` | Connectivity test |
 | `/api/status` | Uptime, RSSI, IP, request count, motor state |
 | `/health` | Tiny health check |
 
-## Motor commands
+## Hardware notes
 
-| Command | Motion |
-|---|---|
-| `w` | forward |
-| `s` | reverse |
-| `a` | strafe left |
-| `d` | strafe right |
-| `wa` | forward-left |
-| `wd` | forward-right |
-| `sa` | reverse-left |
-| `sd` | reverse-right |
-| `q` | rotate counter-clockwise |
-| `e` | rotate clockwise |
-| `stop` | stop |
+- `PIN_ULTRASONIC` is intentionally left as `D1` to match your rover wiring.
+- BMM150 retry-on-boot and `/i2cscan` are preserved from the standalone debug build.
+- Raw `WiFiServer/WiFiClient` request handling is preserved because it was more stable on your hotspot than `WiFiWebServer`.
+- Unknown, malformed, non-GET, or stalled requests are closed immediately.
+- Every response ends with `client.stop()`.
 
-Unknown commands safely resolve to `stop`.
 
-## Notes to verify on hardware
+## Motor command reliability fix
 
-- `PIN_ULTRASONIC` is now `A1` by default because D0/D1 are reserved for `Serial1` on Metro M0. Rewire the 40 kHz detector output to A1 or choose another free input in `AppConfig.h`.
-- The motor direction convention is preserved from the prototype: `LOW = forward`, `HIGH = reverse`. Flip this in `setMotor()` if your driver behaves oppositely.
-- BMM150 setup now enables XYZ measurement with `setMeasurementXYZ()`. Polarity is preserved as `negative Z = DOWN`, `positive Z = UP`; flip the sign if the mounted sensor reports the opposite during the magnet test.
-- Static EEERover IP is disabled by default. Set `EEEROVER_GROUP_NUMBER` in `AppConfig.h` if you need the old `192.168.0.<group+1>` behavior.
+This build sends `/motor` commands using retained `XMLHttpRequest` objects instead of temporary `Image()` requests. The temporary image method could be garbage-collected or cancelled by the browser before the request reliably reached the WINC1500 server. The dashboard now shows an `ack ... HTTP 200` message when the rover confirms a motor command.
+
+For hardware debugging, open this directly in the browser while watching Serial Monitor:
+
+```text
+http://PRINTED_IP/motor?cmd=w&speed=255
+http://PRINTED_IP/motor?cmd=stop
+```
+
+A good firmware/network path prints `[MOTOR] w spd=255` and then `[MOTOR] stop spd=255` in Serial Monitor. If those logs appear but the motors do not move, the issue is motor power/driver wiring/enable pins rather than WiFi or dashboard code.

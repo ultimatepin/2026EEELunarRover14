@@ -24,7 +24,7 @@
 
 // ========================== SERIAL / NETWORK ==========================
 const unsigned long SERIAL_BAUD = 115200;
-const unsigned long SERIAL_WAIT_MS = 5000;
+const unsigned long SERIAL_WAIT_MS = 1200;
 const uint16_t HTTP_PORT = 80;
 
 #define SHIELD_TYPE "Adafruit WINC1500 Shield using WiFi101_Generic"
@@ -35,7 +35,7 @@ const uint16_t HTTP_PORT = 80;
 const uint8_t EEEROVER_GROUP_NUMBER = 0;
 
 const unsigned long WIFI_MAINTAIN_INTERVAL_MS = 10000;
-const unsigned long HTTP_CLIENT_TIMEOUT_MS = 350;
+const unsigned long HTTP_CLIENT_TIMEOUT_MS = 500;
 const size_t HTTP_REQUEST_LINE_MAX = 128;
 const size_t HTTP_TARGET_MAX = 96;
 
@@ -44,15 +44,14 @@ const uint8_t LED_PIN = LED_BUILTIN;
 
 // WINC1500 shield / SPI pins are reserved. Do not assign rover I/O to these.
 // Prototype note: D5, D7, D10 are used by the WINC1500 shield control signals.
-// D0/D1 are reserved here for Serial1. D13 is usable but also drives the onboard LED.
+// D13 is usable but also drives the onboard LED.
 
 // Sensors from the prototype.
 const uint8_t PIN_IR_INTERRUPT = 9;   // IR pulse input, interrupt-capable.
-// IMPORTANT: avoid D0/D1 when Serial1 is enabled.
-// D0 is Serial1 RX and D1 is Serial1 TX on Metro M0. The earlier integrated
-// draft used D1 for ultrasonic, which conflicts with Serial1.begin().
-// Rewire the 40 kHz detector output to A1 unless you deliberately disable Serial1.
-const uint8_t PIN_ULTRASONIC   = 1;  // Digital 40 kHz detector input, safer than D1.
+// User hardware intentionally uses D1 for the 40 kHz ultrasonic detector.
+// Metro M0 D1 is also Serial1 TX; keep this only if your wiring/testing confirms
+// that the ultrasonic detector works on D1 in your rover setup.
+const uint8_t PIN_ULTRASONIC   = 1;   // Digital 40 kHz detector input, original D1 wiring.
 // Serial1 RX on D0 receives radio age strings at 600 bps.
 // BMM150 uses I2C: SDA/SCL on the Metro M0 Wire pins.
 
@@ -78,6 +77,7 @@ const float BMM150_MAX_UT = 500.0f;
 
 // ========================== NON-BLOCKING TASK INTERVALS ==========================
 const unsigned long SENSOR_POLL_INTERVAL_MS = 500;
-const unsigned long SERIAL_PRINT_INTERVAL_MS = 1000;
+const unsigned long SERIAL_PRINT_INTERVAL_MS = 1000; // Only printed when USB Serial is attached.
 const unsigned long SIM_UART_INTERVAL_MS = 3000;
 const unsigned long MOTOR_COMMAND_TIMEOUT_MS = 2500; // Safe stop if dashboard keepalive disappears.
+const unsigned long BMM150_RETRY_INTERVAL_MS = 2000; // Retry magnetometer init after standalone power-up.

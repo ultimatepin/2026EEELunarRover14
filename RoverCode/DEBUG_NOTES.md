@@ -1,11 +1,11 @@
-# Debug notes for EEELunarRover_RawWiFi_Integrated_debugged
+# Debug notes for EEELunarRover_RawWiFi_Integrated_debugged_D1
 
 ## Main changes
 
-1. `PIN_ULTRASONIC` moved from `1` to `A1`.
-   - On Metro M0, D0 is Serial1 RX and D1 is Serial1 TX.
-   - The original integrated code enabled `Serial1.begin(600)` and also used D1 as the ultrasonic input.
-   - Rewire the ultrasonic detector output to A1, or change `PIN_ULTRASONIC` in `AppConfig.h` to a different safe input.
+1. `PIN_ULTRASONIC` is left on D1 as requested.
+   - This preserves the original rover wiring.
+   - Serial Monitor will print a note, not a warning, because D1 is intentional in this build.
+   - If ultrasonic readings still fail, the first thing to test is interaction between D1 and `Serial1`.
 
 2. BMM150 setup now calls `setMeasurementXYZ()`.
    - The DFRobot example initializes operation mode, preset, rate, and XYZ measurement.
@@ -37,7 +37,8 @@
 
 ## Important wiring notes
 
-- D0/D1 are reserved for Serial1.
+- D1 is intentionally used for ultrasonic in this build.
+- D0 is still used by Serial1 RX.
 - D5, D7, and D10 are reserved by the WINC1500 shield.
 - D4 is not interrupt-capable on Metro M0.
 - The Metro M0 logic level is 3.3V. Avoid feeding 5V logic into sensor input pins.

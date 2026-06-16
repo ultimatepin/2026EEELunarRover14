@@ -1,458 +1,159 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>EEELunarRover — Mission Control</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EEELunarRover Control</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap');
-  :root {
-    --bg-void:#06080d;--bg-panel:#0d1017;--bg-card:#141820;--border:#1e2432;--border-lit:#2a3140;
-    --text-1:#eaeef6;--text-2:#7c879e;--text-3:#404858;
-    --blue:#3b8bff;--blue-dim:rgba(59,139,255,0.12);--cyan:#00e5c8;--cyan-dim:rgba(0,229,200,0.10);
-    --green:#2dd4a0;--green-dim:rgba(45,212,160,0.10);--amber:#f0b429;--amber-dim:rgba(240,180,41,0.10);
-    --red:#ff5c5c;--red-dim:rgba(255,92,92,0.08);--purple:#9b8aff;--purple-dim:rgba(155,138,255,0.10);
-    --conf-hi:#2dd4a0;--conf-mid:#f0b429;--conf-lo:#ff5c5c;
-  }
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:'IBM Plex Mono',monospace;background:var(--bg-void);color:var(--text-1);min-height:100vh;overflow-x:hidden;touch-action:none}
-  body::after{content:'';position:fixed;inset:0;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:9999}
-
-  /* HEADER */
-  .hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--bg-panel);position:sticky;top:0;z-index:100}
-  .hdr-left{display:flex;align-items:center;gap:10px}
-  .hdr-mark{width:28px;height:28px;background:linear-gradient(135deg,var(--blue),var(--cyan));border-radius:7px;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:800;font-size:11px;color:var(--bg-void)}
-  .hdr h1{font-family:'Syne',sans-serif;font-size:14px;font-weight:700;letter-spacing:.3px}
-  .hdr h1 span{color:var(--text-2);font-weight:400}
-  .badge{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--cyan);background:var(--cyan-dim);padding:3px 9px;border-radius:20px;border:1px solid rgba(0,229,200,0.15)}
-  .badge-dot{width:5px;height:5px;background:var(--cyan);border-radius:50%;animation:blink 2s ease-in-out infinite}
-  @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
-
-  .sec-title{font-family:'Syne',sans-serif;font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text-3);margin-bottom:14px}
-
-  /* === NEW LAYOUT: full-width movement on top, sensors+result below === */
-  .dash{display:flex;flex-direction:column;gap:1px;background:var(--border)}
-  .pane{background:var(--bg-panel);padding:20px}
-  .pane-ctrl{width:100%}
-  .bottom-row{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}
-  .pane-log{width:100%}
-
-  /* MOVEMENT - full width, horizontal layout */
-  .ctrl-layout{display:flex;align-items:flex-start;gap:32px;flex-wrap:wrap}
-  .joy-outer{width:200px;height:200px;flex-shrink:0;position:relative}
-  .joy-ring{width:100%;height:100%;border-radius:50%;background:radial-gradient(circle at center,var(--bg-card) 40%,var(--bg-void) 100%);border:2px solid var(--border-lit);position:relative;box-shadow:inset 0 0 30px rgba(0,0,0,0.4)}
-  .joy-ring::before{content:'';position:absolute;inset:30%;border-radius:50%;border:1px dashed var(--border)}
-  .joy-ring .cl{position:absolute;font-size:8px;color:var(--text-3);font-weight:500}
-  .joy-ring .cl-n{top:8px;left:50%;transform:translateX(-50%)}
-  .joy-ring .cl-s{bottom:8px;left:50%;transform:translateX(-50%)}
-  .joy-ring .cl-e{right:10px;top:50%;transform:translateY(-50%)}
-  .joy-ring .cl-w{left:10px;top:50%;transform:translateY(-50%)}
-  .joy-knob{width:56px;height:56px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#4a9eff44,#3b8bff22);border:2px solid var(--blue);position:absolute;top:72px;left:72px;box-shadow:0 0 18px rgba(59,139,255,0.25);cursor:grab;transition:box-shadow .15s}
-  .joy-knob.active{cursor:grabbing;box-shadow:0 0 30px rgba(59,139,255,0.45)}
-  .joy-knob::after{content:'';position:absolute;inset:10px;border-radius:50%;background:var(--blue);opacity:.15}
-  .joy-label{text-align:center;margin-top:8px;font-size:9px;color:var(--text-3);letter-spacing:1px}
-  .joy-cmd{text-align:center;margin-top:3px;font-size:12px;color:var(--blue);font-weight:600;min-height:16px}
-
-  /* BUTTON GRID - larger */
-  .btn-col{display:flex;flex-direction:column;gap:8px}
-  .bg{display:grid;grid-template-columns:repeat(3,56px);gap:4px}
-  .db{width:56px;height:48px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--text-2);font-family:'IBM Plex Mono',monospace;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .1s;user-select:none;-webkit-user-select:none}
-  .db:active,.db.on{background:var(--blue-dim);border-color:var(--blue);color:var(--text-1)}
-  .rot-row{display:flex;gap:4px}
-  .rb{flex:1;height:38px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--purple);font-family:'IBM Plex Mono',monospace;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .1s}
-  .rb:active{background:var(--purple-dim);border-color:var(--purple)}
-  .stop-btn{width:100%;height:42px;margin-top:8px;background:var(--red-dim);border:1px solid rgba(255,92,92,0.25);border-radius:8px;color:var(--red);font-family:'Syne',sans-serif;font-size:11px;font-weight:700;letter-spacing:1.5px;cursor:pointer;transition:all .12s}
-  .stop-btn:active{background:rgba(255,92,92,0.2);box-shadow:0 0 20px rgba(255,92,92,0.15)}
-
-  /* SPEED + KEYBOARD */
-  .side-col{display:flex;flex-direction:column;gap:12px;min-width:180px}
-  .spd-row{display:flex;justify-content:space-between;font-size:9px;color:var(--text-3);margin-bottom:4px}
-  .spd-row b{color:var(--cyan);font-weight:500}
-  input[type=range]{-webkit-appearance:none;width:100%;height:3px;background:var(--border);border-radius:2px;outline:none}
-  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;background:var(--cyan);border-radius:50%;cursor:pointer;box-shadow:0 0 8px rgba(0,229,200,0.35)}
-  .keys{padding-top:8px;border-top:1px solid var(--border)}
-  .keys p{font-size:9px;color:var(--text-3);margin-bottom:3px}
-  kbd{display:inline-block;background:var(--bg-card);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:8px;color:var(--text-2);min-width:18px;text-align:center}
-
-  /* SENSOR CARDS */
-  .sg{display:flex;flex-direction:column;gap:8px}
-  .sc{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:12px;transition:border-color .4s,box-shadow .4s}
-  .sc.flash{border-color:var(--blue);box-shadow:0 0 14px rgba(59,139,255,0.06)}
-  .sc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-  .sc-tag{font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-2)}
-  .sc-dot{width:6px;height:6px;border-radius:50%;background:var(--text-3)}
-  .sc-dot.on{background:var(--green)}
-  .sc-val{font-family:'Syne',sans-serif;font-size:26px;font-weight:800;line-height:1}
-  .sc-det{font-size:9px;color:var(--text-2);margin-top:3px}
-  .sc-bar{height:3px;background:var(--border);border-radius:2px;margin-top:8px;overflow:hidden}
-  .sc-fill{height:100%;border-radius:2px;transition:width .5s,background .3s}
-  .sc-conf{font-size:8px;color:var(--text-3);margin-top:3px;text-align:right}
-  .sc-age-human{font-size:12px;color:var(--text-2);margin-top:2px}
-  .sim-b{background:var(--amber-dim);border:1px solid rgba(240,180,41,0.18);border-radius:7px;padding:5px 9px;margin-bottom:12px;display:flex;align-items:center;gap:6px;font-size:9px;color:var(--amber)}
-  .sim-b-dot{width:5px;height:5px;background:var(--amber);border-radius:50%;animation:blink 1.5s ease-in-out infinite}
-
-  /* RESULT */
-  .res-box{display:flex;align-items:center;gap:14px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px}
-  .res-icon{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0;background:var(--bg-card)}
-  .res-info{flex:1}
-  .res-type{font-family:'Syne',sans-serif;font-size:22px;font-weight:800;line-height:1}
-  .res-sub{font-size:9px;color:var(--text-2);margin-top:3px}
-  .res-ring{width:48px;height:48px;position:relative;flex-shrink:0}
-  .res-ring svg{transform:rotate(-90deg)}
-  .res-ring .rt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600}
-  .ref{margin-top:12px;padding-top:10px;border-top:1px solid var(--border)}
-  .ref table{width:100%;font-size:8px;border-collapse:collapse}
-  .ref th{text-align:left;color:var(--text-3);font-weight:400;padding:3px 0;border-bottom:1px solid var(--border)}
-  .ref td{padding:3px 0;color:var(--text-2)}
-
-  /* LOG */
-  .log-box{max-height:150px;overflow-y:auto;font-size:9px;line-height:1.8}
-  .log-box::-webkit-scrollbar{width:3px}
-  .log-box::-webkit-scrollbar-thumb{background:var(--border-lit);border-radius:2px}
-  .le{white-space:nowrap}
-  .lt{color:var(--text-3)}.l-uart{color:var(--purple)}.l-ir{color:var(--amber)}.l-us{color:var(--cyan)}.l-mag{color:var(--blue)}.l-fuse{color:var(--green)}.l-mot{color:var(--red)}.lm{color:var(--text-2)}
-
-  /* RESPONSIVE */
-  @media(max-width:700px){.bottom-row{grid-template-columns:1fr}.ctrl-layout{flex-direction:column;align-items:center}}
-  .pane{animation:fadeUp .5s ease both}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+:root{font-family:system-ui,Arial;background:#0f1218;color:#f2f5fb}body{margin:0;padding:16px;max-width:760px}h1{margin:0 0 6px}.sub{color:#9aa6b8;margin:0 0 14px}.grid{display:grid;gap:12px}.card{background:#171c25;border:1px solid #303848;border-radius:14px;padding:14px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.big{font-size:32px;font-weight:800}.pill{display:inline-block;border:1px solid #4b5568;border-radius:999px;padding:7px 12px;background:#202838}.ok{color:#4ade80}.warn{color:#facc15}.bad{color:#fb7185}button{font:inherit;font-weight:700;border:1px solid #4b5568;border-radius:10px;background:#202838;color:#f2f5fb;padding:10px 14px}button:active{background:#2f6feb}.keys{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:360px;margin-top:12px}.key{border:1px solid #4b5568;border-radius:12px;padding:12px;text-align:center;background:#202838;font-weight:800;user-select:none}.key span{display:block;font-size:12px;color:#9aa6b8;font-weight:500}.key.on{background:#2f6feb;border-color:#8ab4ff;color:white}.key.on span{color:white}.metric{display:grid;grid-template-columns:110px 1fr;gap:5px 10px}.label{color:#9aa6b8}pre{white-space:pre-wrap;background:#0b0e13;border-radius:10px;padding:10px;overflow:auto}details{color:#cbd5e1}summary{cursor:pointer;color:#9aa6b8}.footer{font-size:13px;color:#9aa6b8}
 </style>
 </head>
-<body>
-
-<div class="hdr">
-  <div class="hdr-left">
-    <div class="hdr-mark">LR</div>
-    <h1>EEELunarRover <span>Mission Control</span></h1>
-  </div>
-  <div class="badge"><div class="badge-dot"></div><span id="modeLabel">LIVE</span></div>
+<body tabindex="0">
+<h1>EEELunarRover</h1>
+<p class="sub">Hold WASD / arrows to drive. Release keys to stop. Press Z to toggle 110/255 PWM.</p>
+<div class="grid">
+  <section class="card">
+    <div class="row">
+      <span>Command</span><span id="cmdText" class="big warn">STOP</span>
+      <span class="pill">Speed <b id="speedText">110</b></span>
+      <button id="speedBtn" onclick="toggleSpeed('button')">Z: speed</button>
+      <button onclick="emergencyStop('button')">EMERGENCY STOP</button>
+    </div>
+    <div class="keys">
+      <div></div><div id="keyW" class="key">W<span>forward</span></div><div></div>
+      <div id="keyA" class="key">A<span>left</span></div><div id="keyS" class="key">S<span>back</span></div><div id="keyD" class="key">D<span>right</span></div>
+      <div id="keyQ" class="key">Q<span>rotate L</span></div><div id="keyZ" class="key">Z<span>110/255</span></div><div id="keyE" class="key">E<span>rotate R</span></div>
+    </div>
+    <p id="motorStatus" class="footer">ready</p>
+  </section>
+  <section class="card">
+    <h2>Rock telemetry</h2>
+    <div class="metric">
+      <div class="label">Rock</div><div id="rock">--</div>
+      <div class="label">Confidence</div><div id="fusion">--</div>
+      <div class="label">Age</div><div id="age">--</div>
+      <div class="label">IR</div><div id="ir">--</div>
+      <div class="label">Ultrasonic</div><div id="us">--</div>
+      <div class="label">Magnetic</div><div id="mag">--</div>
+    </div>
+  </section>
+  <section class="card">
+    <div class="row">
+      <button onclick="ping()">Ping</button>
+      <button onclick="loadSensor()">Refresh sensor</button>
+      <button onclick="loadDebug()">Debug</button>
+      <button onclick="loadI2c()">I2C</button>
+      <button onclick="sendMotor('w','test forward');setTimeout(function(){sendMotor('stop','test auto-stop');},350)">Motor test</button>
+      <span id="conn" class="footer">not tested</span>
+    </div>
+    <details><summary>Raw JSON</summary><pre id="rawOut">not loaded</pre></details>
+  </section>
 </div>
-
-<div class="dash">
-
-  <!-- MOVEMENT — full width top -->
-  <div class="pane pane-ctrl">
-    <div class="sec-title">Movement</div>
-    <div class="ctrl-layout">
-      <!-- Joystick -->
-      <div>
-        <div class="joy-outer">
-          <div class="joy-ring" id="joyBase">
-            <span class="cl cl-n">FWD</span>
-            <span class="cl cl-s">REV</span>
-            <span class="cl cl-e">R</span>
-            <span class="cl cl-w">L</span>
-            <div class="joy-knob" id="joyKnob"></div>
-          </div>
-        </div>
-        <div class="joy-label">DRAG / TOUCH</div>
-        <div class="joy-cmd" id="joyCmd">&nbsp;</div>
-      </div>
-      <!-- Button grid -->
-      <div class="btn-col">
-        <div class="bg">
-          <button class="db" data-c="wa">&#x2196;</button>
-          <button class="db" data-c="w">&#x2191;</button>
-          <button class="db" data-c="wd">&#x2197;</button>
-          <button class="db" data-c="a">&#x2190;</button>
-          <button class="db" data-c="stop">&#x25A0;</button>
-          <button class="db" data-c="d">&#x2192;</button>
-          <button class="db" data-c="sa">&#x2199;</button>
-          <button class="db" data-c="s">&#x2193;</button>
-          <button class="db" data-c="sd">&#x2198;</button>
-        </div>
-        <div class="rot-row">
-          <button class="rb" data-c="q">&#x21BA; CCW</button>
-          <button class="rb" data-c="e">CW &#x21BB;</button>
-        </div>
-        <button class="stop-btn" id="stopBtn">STOP</button>
-      </div>
-      <!-- Speed + keyboard -->
-      <div class="side-col">
-        <div>
-          <div class="spd-row"><span>PWM SPEED</span><b id="spdVal">180</b></div>
-          <input type="range" id="spdSlider" min="0" max="255" value="180">
-        </div>
-        <div class="keys">
-          <div class="sec-title" style="margin-bottom:8px">Keyboard</div>
-          <p><kbd>W</kbd> forward &nbsp; <kbd>S</kbd> backward</p>
-          <p><kbd>A</kbd> left &nbsp; <kbd>D</kbd> right</p>
-          <p><kbd>W</kbd>+<kbd>A</kbd> fwd-left &nbsp; <kbd>W</kbd>+<kbd>D</kbd> fwd-right</p>
-          <p><kbd>S</kbd>+<kbd>A</kbd> back-left &nbsp; <kbd>S</kbd>+<kbd>D</kbd> back-right</p>
-          <p><kbd>Q</kbd> rotate left &nbsp; <kbd>E</kbd> rotate right</p>
-          <p><kbd>Space</kbd> stop / invalid combo stops</p>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- BOTTOM ROW: sensors left, result+log right -->
-  <div class="bottom-row">
-    <div class="pane pane-sens" style="animation-delay:.08s">
-      <div class="sec-title">Sensors</div>
-      <div class="sim-b"><div class="sim-b-dot"></div>Live rover data — SIM mode available for UI testing</div>
-      <div class="sg">
-        <div class="sc" id="cAge"><div class="sc-head"><span class="sc-tag">&#x1F4E1; Radio Age (UART)</span><div class="sc-dot on"></div></div><div class="sc-val" id="vAge">#---</div><div class="sc-age-human" id="vAgeH">waiting...</div></div>
-        <div class="sc" id="cIr"><div class="sc-head"><span class="sc-tag">&#x1F534; IR Pulse Rate</span><div class="sc-dot on"></div></div><div class="sc-val" id="vIr">---</div><div class="sc-det" id="dIr">&#955; = --- s&#x207B;&#xB9; &middot; LLR = ---</div><div class="sc-bar"><div class="sc-fill" id="fIr" style="width:0"></div></div><div class="sc-conf" id="cIrC">--</div></div>
-        <div class="sc" id="cUs"><div class="sc-head"><span class="sc-tag">&#x1F50A; Ultrasonic 40kHz</span><div class="sc-dot on"></div></div><div class="sc-val" id="vUs">---</div><div class="sc-det" id="dUs">signal: ---</div><div class="sc-bar"><div class="sc-fill" id="fUs" style="width:0"></div></div><div class="sc-conf" id="cUsC">--</div></div>
-        <div class="sc" id="cMag"><div class="sc-head"><span class="sc-tag">&#x1F9F2; Magnetic (BMM150)</span><div class="sc-dot on"></div></div><div class="sc-val" id="vMag">---</div><div class="sc-det" id="dMag">Z = --- &#xB5;T</div><div class="sc-bar"><div class="sc-fill" id="fMag" style="width:0"></div></div><div class="sc-conf" id="cMagC">--</div></div>
-      </div>
-    </div>
-    <div class="pane pane-res" style="animation-delay:.16s">
-      <div class="sec-title">Classification</div>
-      <div class="res-box">
-        <div class="res-icon" id="resIcon">&#x1FAA8;</div>
-        <div class="res-info"><div class="res-type" id="resType">Waiting...</div><div class="res-sub" id="resSub">acquiring sensor data</div></div>
-        <div class="res-ring"><svg width="48" height="48" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="none" stroke="var(--border)" stroke-width="3"/><circle id="resRing" cx="24" cy="24" r="20" fill="none" stroke="var(--text-3)" stroke-width="3" stroke-dasharray="125.66" stroke-dashoffset="125.66" stroke-linecap="round"/></svg><div class="rt" id="resConf">--%</div></div>
-      </div>
-      <div class="ref"><table><tr><th>Type</th><th>IR</th><th>US</th><th>Mag</th></tr><tr><td>Basaltoid</td><td>547 (H)</td><td>Present</td><td>Down</td></tr><tr><td>Gravion</td><td>312 (L)</td><td>Absent</td><td>Down</td></tr><tr><td>Regolix</td><td>312 (L)</td><td>Present</td><td>Up</td></tr><tr><td>Lunarite</td><td>547 (H)</td><td>Absent</td><td>Up</td></tr></table></div>
-      <div style="margin-top:16px">
-        <div class="sec-title">System Log</div>
-        <div class="log-box" id="logBox"></div>
-      </div>
-    </div>
-  </div>
-</div>
-
+<p class="footer">Safety: blur, tab switch, page close, or motor watchdog all stop the rover.</p>
 <script>
-const ROCKS=[
-  {name:'Basaltoid',ir:547,us:true,mag:'DOWN',clr:'var(--red)',emoji:'&#x1F534;'},
-  {name:'Gravion',ir:312,us:false,mag:'DOWN',clr:'var(--purple)',emoji:'&#x1F7E3;'},
-  {name:'Regolix',ir:312,us:true,mag:'UP',clr:'var(--blue)',emoji:'&#x1F535;'},
-  {name:'Lunarite',ir:547,us:false,mag:'UP',clr:'var(--green)',emoji:'&#x1F7E2;'}
-];
-let simRock=ROCKS[Math.floor(Math.random()*4)];
-let simAge='#'+(1+Math.floor(Math.random()*4))+''+Math.floor(Math.random()*10)+''+Math.floor(Math.random()*10);
-
-function gauss(){let u=0,v=0;while(!u)u=Math.random();while(!v)v=Math.random();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
-
-function simData(){
-  const T=0.2,r=simRock;
-  const ec=r.ir*T,cnt=Math.max(0,Math.round(ec+gauss()*Math.sqrt(ec)));
-  const lam=cnt/T,llr=cnt*Math.log(547/312)-(547-312)*T;
-  const irL=llr>0?'HIGH':'LOW',irC=Math.abs(llr)/(Math.abs(llr)+5);
-  const usL=r.us?'PRESENT':'ABSENT',usC=.92+Math.random()*.08;
-  const hOff=r.mag==='DOWN'?(300+Math.random()*200):-(300+Math.random()*200);
-  const hAdc=Math.round(2048+hOff),magL=hOff>0?'DOWN':'UP';
-  const magDev=Math.abs(hAdc-2048),magC=Math.min(1,magDev/1024);
-  const zUt=hOff>0?-(200+Math.random()*150):(200+Math.random()*150);
-  const code=((irL==='HIGH'?1:0)<<2)|((usL==='PRESENT'?1:0)<<1)|(magL==='DOWN'?1:0);
-  const tm={7:'Basaltoid',1:'Gravion',2:'Regolix',4:'Lunarite'};
-  return{age:simAge,ir:{label:irL,lambda:lam,llr,conf:irC,count:cnt},us:{label:usL,conf:usC},mag:{label:magL,adc:hAdc,dev:magDev,conf:magC,z:zUt},type:tm[code]||'CONFLICT',fusionConf:(irC+usC+magC)/3};
+const pressed={};
+const speeds=[110,255];
+let speedIndex=0,currentCmd='stop',motorSeq=0,keepaliveId=null,apiBusy=false,apiPending=null;
+const motorRequests=[];
+function speed(){return speeds[speedIndex];}
+function setText(id,v){document.getElementById(id).textContent=v;}
+function setClass(id,c){document.getElementById(id).className=c;}
+function req(path,cb){
+  if(apiBusy){apiPending=[path,cb];return;}
+  apiBusy=true;
+  const x=new XMLHttpRequest();x.timeout=3000;
+  x.onreadystatechange=function(){if(x.readyState===4){apiBusy=false;cb(x.status,x.responseText);if(apiPending){const p=apiPending;apiPending=null;req(p[0],p[1]);}}};
+  x.ontimeout=function(){apiBusy=false;cb(0,'timeout');};
+  x.open('GET',path);x.send();
 }
+function sendMotor(c,why){
+  motorSeq++;
+  const seq=motorSeq;
+  const url='/motor?cmd='+encodeURIComponent(c)+'&speed='+speed()+'&seq='+seq+'&_t='+Date.now();
+  const x=new XMLHttpRequest();
 
-function cc(v){return v>=.7?'var(--conf-hi)':v>=.4?'var(--conf-mid)':'var(--conf-lo)';}
+  // Keep the XHR object in motorRequests until it finishes.
+  // A temporary Image() request can be garbage-collected by the browser before
+  // the GET reliably reaches a tiny embedded server. Retained XHR is more
+  // predictable while still being fast enough for WASD control.
+  motorRequests.push(x);
+  while(motorRequests.length>8){motorRequests.shift();}
 
-function updateUI(d){
-  document.getElementById('vAge').textContent=d.age;
-  const dg=d.age.slice(1);document.getElementById('vAgeH').textContent=dg[0]+'.'+dg[1]+dg[2]+' billion years';
-  const vi=document.getElementById('vIr');vi.textContent=d.ir.label;vi.style.color=d.ir.label==='HIGH'?'var(--amber)':'var(--cyan)';
-  document.getElementById('dIr').textContent='\u03BB = '+d.ir.lambda.toFixed(0)+' s\u207B\u00B9 \u00B7 LLR = '+d.ir.llr.toFixed(2);
-  document.getElementById('fIr').style.cssText='width:'+(d.ir.conf*100)+'%;background:'+cc(d.ir.conf);
-  document.getElementById('cIrC').textContent=(d.ir.conf*100).toFixed(0)+'%';
-  const vu=document.getElementById('vUs');vu.textContent=d.us.label;vu.style.color=d.us.label==='PRESENT'?'var(--green)':'var(--text-2)';
-  document.getElementById('dUs').textContent='signal: '+d.us.label.toLowerCase();
-  document.getElementById('fUs').style.cssText='width:'+(d.us.conf*100)+'%;background:'+cc(d.us.conf);
-  document.getElementById('cUsC').textContent=(d.us.conf*100).toFixed(0)+'%';
-  const vm=document.getElementById('vMag');vm.textContent=d.mag.label;vm.style.color=d.mag.label==='DOWN'?'var(--blue)':'var(--purple)';
-  document.getElementById('dMag').textContent='Z = '+d.mag.z.toFixed(1)+' \u00B5T';
-  document.getElementById('fMag').style.cssText='width:'+(d.mag.conf*100)+'%;background:'+cc(d.mag.conf);
-  document.getElementById('cMagC').textContent=(d.mag.conf*100).toFixed(0)+'%';
-  const ri=ROCKS.find(r=>r.name===d.type);
-  document.getElementById('resType').textContent=d.type;
-  document.getElementById('resType').style.color=ri?ri.clr:'var(--text-1)';
-  document.getElementById('resIcon').innerHTML=ri?ri.emoji:'&#x1FAA8;';
-  document.getElementById('resIcon').style.background=ri?'color-mix(in srgb, '+ri.clr+' 10%, transparent)':'var(--bg-card)';
-  document.getElementById('resSub').textContent='IR='+d.ir.label+' US='+d.us.label+' MAG='+d.mag.label;
-  const circ=125.66,off=circ*(1-d.fusionConf);const ring=document.getElementById('resRing');ring.style.strokeDashoffset=off;ring.style.stroke=cc(d.fusionConf);
-  document.getElementById('resConf').textContent=(d.fusionConf*100).toFixed(0)+'%';
-  ['cIr','cUs','cMag'].forEach(id=>{const el=document.getElementById(id);el.classList.add('flash');setTimeout(()=>el.classList.remove('flash'),500);});
-}
-
-const logEl=document.getElementById('logBox');let lc=0;
-function addLog(tag,cls,msg){const ts=new Date().toTimeString().slice(0,8);const e=document.createElement('div');e.className='le';e.innerHTML='<span class="lt">'+ts+'</span> <span class="'+cls+'">['+tag+']</span> <span class="lm">'+msg+'</span>';logEl.appendChild(e);lc++;if(lc>60)logEl.removeChild(logEl.firstChild);logEl.scrollTop=logEl.scrollHeight;}
-
-let roverIP=(location.hostname||'172.20.10.5');
-let liveMode=(location.protocol==='http:'||location.protocol==='https:');
-function apiUrl(path){
-  // Served from the rover: use a same-origin relative URL.
-  // Opened as a local file: use the IP entered in the footer.
-  if((location.protocol==='http:'||location.protocol==='https:') && roverIP===location.hostname)return path;
-  return 'http://'+roverIP+path;
-}
-function setModeLabel(){var m=document.getElementById('modeLabel');if(m)m.textContent=liveMode?'LIVE':'SIMULATED';}
-function setIP(ip){roverIP=(ip||location.hostname||roverIP);addLog('SYS','l-fuse','Rover IP set to '+roverIP);}
-function spd(){return document.getElementById('spdSlider').value;}
-
-// ============================================================
-//  WiFi101 STRICT SINGLE-REQUEST ENGINE
-//  Rule: only ONE HTTP request in flight at a time. Ever.
-//  New commands replace the pending slot (latest-wins).
-//  Uses Image().src to bypass file:// CORS restrictions.
-// ============================================================
-let busy=false, pending=null, lastCmd='';
-
-function motorSend(c){
-  if(!liveMode)return;
-  if(busy){pending=c;return;}
-  busy=true; pending=null;
-  var img=new Image();
-  img.onload=img.onerror=function(){
-    busy=false;
-    if(pending!==null){var p=pending;pending=null;motorSend(p);}
+  x.timeout=700;
+  x.onreadystatechange=function(){
+    if(x.readyState===4){
+      const i=motorRequests.indexOf(x); if(i>=0)motorRequests.splice(i,1);
+      if(seq===motorSeq){
+        const body=(x.responseText||'').trim();
+        setText('motorStatus','ack '+(body||c).toUpperCase()+' | speed '+speed()+' | HTTP '+x.status+' | #'+seq);
+      }
+    }
   };
-  img.src=apiUrl('/motor?cmd='+encodeURIComponent(c)+'&speed='+spd()+'&_t='+Date.now());
-  setTimeout(function(){
-    if(busy){busy=false;if(pending!==null){var p=pending;pending=null;motorSend(p);}}
-  },800);
+  x.ontimeout=function(){
+    const i=motorRequests.indexOf(x); if(i>=0)motorRequests.splice(i,1);
+    if(seq===motorSeq)setText('motorStatus','motor request timeout | '+c.toUpperCase()+' | #'+seq);
+  };
+  x.onerror=function(){
+    const i=motorRequests.indexOf(x); if(i>=0)motorRequests.splice(i,1);
+    if(seq===motorSeq)setText('motorStatus','motor request failed | '+c.toUpperCase()+' | #'+seq);
+  };
+  x.open('GET',url,true);
+  x.send();
+  setText('motorStatus','sending '+c.toUpperCase()+' | speed '+speed()+' | '+why+' | #'+seq);
 }
-
-function mc(c){
-  c=(c||'stop').toLowerCase();
-  if(c===lastCmd)return;
-  lastCmd=c;
-  addLog('MOT','l-mot',c.toUpperCase()+' @ PWM='+spd());
-  motorSend(c);
-}
-
-// Keepalive: resend current cmd every 2s while driving (feeds Arduino watchdog)
-let keepaliveId=null;
-function startKeepalive(){
-  stopKeepalive();
-  keepaliveId=setInterval(function(){if(liveMode&&lastCmd&&lastCmd!=='stop')motorSend(lastCmd);},2000);
-}
-function stopKeepalive(){if(keepaliveId){clearInterval(keepaliveId);keepaliveId=null;}}
-
-// Button handlers — press-to-move, release-to-stop
-function pressButton(b,c){b.classList.add('on');mc(c);startKeepalive();}
-function releaseButton(b){b.classList.remove('on');stopKeepalive();mc('stop');}
-document.querySelectorAll('.db,.rb').forEach(function(b){
-  var c=b.dataset.c;if(!c)return;
-  b.addEventListener('mousedown',function(){pressButton(b,c);});
-  b.addEventListener('mouseup',function(){releaseButton(b);});
-  b.addEventListener('mouseleave',function(){releaseButton(b);});
-  b.addEventListener('touchstart',function(e){e.preventDefault();pressButton(b,c);},{passive:false});
-  b.addEventListener('touchend',function(e){e.preventDefault();releaseButton(b);},{passive:false});
-  b.addEventListener('touchcancel',function(e){e.preventDefault();releaseButton(b);},{passive:false});
-});
-document.getElementById('stopBtn').addEventListener('click',function(){pressedKeys.clear();stopKeepalive();mc('stop');});
-document.getElementById('spdSlider').addEventListener('input',function(){document.getElementById('spdVal').textContent=this.value;});
-
-// Keyboard: WASD movement, Q/E rotation, Space = emergency stop
-const validKeys=new Set(['w','a','s','d','q','e']);
-const pressedKeys=new Set();
-function keyboardCmd(){
-  if(pressedKeys.size===0)return 'stop';
-  if(pressedKeys.size===1)return [...pressedKeys][0];
-  if(pressedKeys.size===2){
-    if(pressedKeys.has('w')&&pressedKeys.has('a'))return 'wa';
-    if(pressedKeys.has('w')&&pressedKeys.has('d'))return 'wd';
-    if(pressedKeys.has('s')&&pressedKeys.has('a'))return 'sa';
-    if(pressedKeys.has('s')&&pressedKeys.has('d'))return 'sd';
-  }
+function commandFromKeys(){
+  const w=!!pressed.w,a=!!pressed.a,s=!!pressed.s,d=!!pressed.d,q=!!pressed.q,e=!!pressed.e;
+  if(q&&!e)return 'q'; if(e&&!q)return 'e';
+  const y=(w?1:0)-(s?1:0), x=(d?1:0)-(a?1:0);
+  if(y===1&&x===0)return 'w'; if(y===-1&&x===0)return 's'; if(y===0&&x===-1)return 'a'; if(y===0&&x===1)return 'd';
+  if(y===1&&x===-1)return 'wa'; if(y===1&&x===1)return 'wd'; if(y===-1&&x===-1)return 'sa'; if(y===-1&&x===1)return 'sd';
   return 'stop';
 }
-document.addEventListener('keydown',function(e){
-  var k=e.key.toLowerCase();
-  if(k===' '){e.preventDefault();pressedKeys.clear();stopKeepalive();mc('stop');return;}
-  if(!validKeys.has(k))return;
-  e.preventDefault();
-  var wasEmpty=(pressedKeys.size===0);
-  pressedKeys.add(k);
-  var cmd=keyboardCmd();
-  mc(cmd);
-  if(wasEmpty&&cmd!=='stop')startKeepalive();
-});
-document.addEventListener('keyup',function(e){
-  var k=e.key.toLowerCase();
-  if(!validKeys.has(k))return;
-  e.preventDefault();
-  pressedKeys.delete(k);
-  var cmd=keyboardCmd();
-  mc(cmd);
-  if(cmd==='stop')stopKeepalive();
-});
-window.addEventListener('blur',function(){pressedKeys.clear();stopKeepalive();mc('stop');});
-document.addEventListener('visibilitychange',function(){if(document.hidden){pressedKeys.clear();stopKeepalive();mc('stop');}});
-
-const jBase=document.getElementById('joyBase'),jKnob=document.getElementById('joyKnob'),jCmdEl=document.getElementById('joyCmd');
-let jAct=false,jCx=100,jCy=100,jR=70;
-function jStart(e){jAct=true;jKnob.classList.add('active');jMove(e);}
-function jEnd(){jAct=false;jKnob.classList.remove('active');jKnob.style.left='72px';jKnob.style.top='72px';jCmdEl.textContent='\u00A0';mc('stop');}
-function jMove(e){
-  if(!jAct)return;
-  e.preventDefault();
-  const r=jBase.getBoundingClientRect();
-  const t=e.touches?e.touches[0]:e;
-  let dx=t.clientX-r.left-jCx,dy=t.clientY-r.top-jCy;
-  let dist=Math.sqrt(dx*dx+dy*dy);
-  if(dist>jR){dx=dx/dist*jR;dy=dy/dist*jR;dist=jR;}
-  jKnob.style.left=(jCx-28+dx)+'px';
-  jKnob.style.top=(jCy-28+dy)+'px';
-  if(dist<16){jCmdEl.textContent='\u00A0';mc('stop');return;}
-  let ang=Math.atan2(-dy,dx)*180/Math.PI;if(ang<0)ang+=360;
-  let cmd;
-  if(ang>=67.5&&ang<112.5)cmd='w';
-  else if(ang>=112.5&&ang<157.5)cmd='wa';
-  else if(ang>=157.5&&ang<202.5)cmd='a';
-  else if(ang>=202.5&&ang<247.5)cmd='sa';
-  else if(ang>=247.5&&ang<292.5)cmd='s';
-  else if(ang>=292.5&&ang<337.5)cmd='sd';
-  else if(ang>=337.5||ang<22.5)cmd='d';
-  else cmd='wd';
-  jCmdEl.textContent=cmd.toUpperCase();
-  mc(cmd);
+function refreshUi(){
+  ['w','a','s','d','q','e'].forEach(k=>{const el=document.getElementById('key'+k.toUpperCase()); if(el)el.className=pressed[k]?'key on':'key';});
+  setText('cmdText',currentCmd.toUpperCase()); setClass('cmdText',currentCmd==='stop'?'big warn':'big ok');
+  setText('speedText',speed()); document.getElementById('keyZ').className=speed()===255?'key on':'key';
 }
-jBase.addEventListener('mousedown',jStart);jBase.addEventListener('touchstart',jStart,{passive:false});
-document.addEventListener('mousemove',jMove);document.addEventListener('touchmove',jMove,{passive:false});
-document.addEventListener('mouseup',jEnd);document.addEventListener('touchend',jEnd);
-
-// Sensor polling — only in LIVE mode, respects the single-request queue
-let sensorBusy=false;
-function tick(){
-  if(liveMode&&!busy&&!sensorBusy){
-    sensorBusy=true;
-    var x=new XMLHttpRequest();
-    x.timeout=2000;
-    x.open('GET',apiUrl('/sensor'));
-    x.onreadystatechange=function(){
-      if(x.readyState===4){
-        sensorBusy=false;
-        if(x.status===200){
-          try{
-            var d=JSON.parse(x.responseText);
-            d.ir=d.ir||{};d.ultrasonic=d.ultrasonic||{};d.magnetic=d.magnetic||{};
-            var md={
-              age:d.age||'#---',
-              ir:{label:d.ir.label||'---',lambda:Number(d.ir.lambda)||0,llr:Number(d.ir.llr)||0,conf:Number(d.ir.conf)||0,count:Number(d.ir.count)||0},
-              us:{label:d.ultrasonic.label||'---',conf:Number(d.ultrasonic.conf)||0},
-              mag:{label:d.magnetic.label||'---',z:Number(d.magnetic.z)||0,conf:Number(d.magnetic.conf)||0},
-              type:d.rockType||'---',fusionConf:Number(d.fusionConf)||0
-            };
-            updateUI(md);addLog('POLL','l-fuse',md.type+' conf='+(Math.round(md.fusionConf*100))+'%');
-          }catch(e){addLog('ERR','l-mot','JSON parse error');}
-        }else{addLog('ERR','l-mot','Poll failed — check IP: '+roverIP);}
-      }
-    };
-    x.ontimeout=function(){sensorBusy=false;addLog('ERR','l-mot','Sensor poll timeout');};
-    x.send();
-  }else if(!liveMode){
-    const d=simData();updateUI(d);
-    addLog('UART','l-uart','Age = '+d.age);
-    addLog('IR','l-ir','cnt='+d.ir.count+' λ='+d.ir.lambda.toFixed(0)+' LLR='+d.ir.llr.toFixed(2)+' → '+d.ir.label);
-    addLog('US','l-us',d.us.label+' ('+Math.round(d.us.conf*100)+'%)');
-    addLog('MAG','l-mag','Z='+d.mag.z.toFixed(1)+'µT → '+d.mag.label+' ('+Math.round(d.mag.conf*100)+'%)');
-    addLog('FUSE','l-fuse',d.type+' ('+Math.round(d.fusionConf*100)+'%)');
-  }
+function updateDrive(why){
+  const next=commandFromKeys();
+  if(next!==currentCmd){currentCmd=next;refreshUi();sendMotor(next,why); if(next==='stop')stopKeepalive(); else startKeepalive();}
+  else refreshUi();
 }
-addLog('SYS','l-fuse','Dashboard online \u2014 SIMULATED MODE');addLog('SYS','l-fuse','Rock: '+simRock.name+' | Age: '+simAge);tick();setInterval(tick,3000);
+function keyName(ev){
+  const k=(ev.key||'').toLowerCase();
+  if(['w','a','s','d','q','e','z'].includes(k))return k;
+  if(ev.code==='ArrowUp')return 'w'; if(ev.code==='ArrowDown')return 's'; if(ev.code==='ArrowLeft')return 'a'; if(ev.code==='ArrowRight')return 'd'; return '';
+}
+function toggleSpeed(why){
+  speedIndex=1-speedIndex; refreshUi();
+  if(currentCmd!=='stop')sendMotor(currentCmd,'speed toggle '+why); else setText('motorStatus','speed set to '+speed());
+}
+window.addEventListener('keydown',function(ev){
+  const k=keyName(ev); if(!k)return; ev.preventDefault();
+  if(k==='z'){if(!ev.repeat)toggleSpeed('z');return;}
+  if(!pressed[k]){pressed[k]=true;updateDrive('keydown '+k);}
+});
+window.addEventListener('keyup',function(ev){
+  const k=keyName(ev); if(!k||k==='z')return; ev.preventDefault();
+  if(pressed[k]){delete pressed[k];updateDrive('keyup '+k);}
+});
+function emergencyStop(why){['w','a','s','d','q','e'].forEach(k=>delete pressed[k]);currentCmd='stop';refreshUi();sendMotor('stop','stop '+why);stopKeepalive();}
+function startKeepalive(){if(keepaliveId)return;keepaliveId=setInterval(function(){if(currentCmd!=='stop')sendMotor(currentCmd,'keepalive');},600);}
+function stopKeepalive(){if(keepaliveId){clearInterval(keepaliveId);keepaliveId=null;}}
+window.addEventListener('blur',function(){emergencyStop('window blur');});
+document.addEventListener('visibilitychange',function(){if(document.hidden)emergencyStop('page hidden');});
+window.addEventListener('beforeunload',function(){sendMotor('stop','page unload');});
+function fmtConf(v){return v==null?'--':Math.round(v*100)+'%';}
+function showSensor(t){
+  setText('rawOut',t);
+  try{const j=JSON.parse(t);setText('rock',j.rockType||'UNKNOWN');setText('fusion',fmtConf(j.fusionConf));setText('age',j.age||'--');setText('ir',(j.ir&&j.ir.label)||'--');setText('us',(j.ultrasonic&&j.ultrasonic.label)||'--');setText('mag',(j.magnetic&&j.magnetic.label)||'--');}
+  catch(e){setText('rawOut','sensor parse failed: '+e+'\n'+t);}
+}
+function ping(){req('/api/ping?_t='+Date.now(),function(s,t){setText('conn',s===200?'online':'failed: '+t);setClass('conn',s===200?'ok':'bad');});}
+function loadSensor(){req('/sensor?_t='+Date.now(),function(s,t){if(s===200)showSensor(t);else setText('rawOut','sensor failed: '+t);});}
+function loadDebug(){req('/debug?_t='+Date.now(),function(s,t){setText('rawOut',t);});}
+function loadI2c(){req('/i2cscan?_t='+Date.now(),function(s,t){setText('rawOut',t);});}
+refreshUi();ping();loadSensor();setInterval(loadSensor,1500);document.body.focus();
 </script>
-<div style="position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e2432;padding:8px 16px;display:flex;gap:8px;align-items:center;z-index:999;font-family:monospace;font-size:12px;">
-  <span style="color:#7c879e;">ROVER IP:</span>
-  <input id="ipInput" type="text" value="" placeholder="same host" style="background:#141820;border:1px solid #2a3140;color:#eaeef6;padding:4px 8px;border-radius:4px;font-family:monospace;font-size:12px;width:140px;">
-  <button onclick="setIP(document.getElementById('ipInput').value || location.hostname);liveMode=true;setModeLabel();this.textContent='● LIVE';this.style.background='#2dd4a033';this.style.color='#2dd4a0';" style="background:#3b8bff22;border:1px solid #3b8bff66;color:#3b8bff;padding:4px 12px;border-radius:4px;cursor:pointer;font-family:monospace;font-size:11px;">CONNECT</button>
-  <button onclick="liveMode=false;setModeLabel();addLog('SYS','l-fuse','Switched to SIM mode');" style="background:#1e2432;border:1px solid #2a3140;color:#7c879e;padding:4px 12px;border-radius:4px;cursor:pointer;font-family:monospace;font-size:11px;">SIM</button>
-</div>
-<div style="height:44px"></div>
 </body>
 </html>

@@ -27,6 +27,8 @@ namespace
   unsigned long lastSimUart = 0;
 
   bool bmm150Ready = false;
+  unsigned long bmm150InitAttempts = 0;
+  unsigned long lastBmm150RetryMs = 0;
   unsigned long simSeed = 0;
 
   int motorSpeed = 180;
@@ -34,6 +36,67 @@ namespace
   unsigned long lastMotorCommandMs = 0;
 
   DFRobot_BMM150_I2C bmm150(&Wire, I2C_ADDRESS_4);
+
+
+  bool serialDebugEnabled()
+  {
+    /*
+      On the Metro M0, Serial is USB CDC. When the rover is powered from a
+      battery or wall adapter without a computer attached, Serial may not be
+      open. Large Serial logs are useful on the bench, but should not be part
+      of the rover's runtime behaviour when it is standalone.
+    */
+    return Serial;
+  }
+
+#if !ROVER_SIMULATED_MODE
+  bool tryInitBmm150(bool verbose)
+  {
+    bmm150InitAttempts++;
+
+    if (bmm150.begin() == BMM150_OK)
+    {
+      bmm150.setOperationMode(BMM150_POWERMODE_NORMAL);
+      bmm150.setPresetMode(BMM150_PRESETMODE_HIGHACCURACY);
+      bmm150.setRate(BMM150_DATA_RATE_10HZ);
+      bmm150.setMeasurementXYZ();
+      bmm150Ready = true;
+
+      if (verbose && serialDebugEnabled())
+      {
+        Serial.print(F("[MAG] BMM150 initialised OK after attempt "));
+        Serial.println(bmm150InitAttempts);
+      }
+      return true;
+    }
+
+    bmm150Ready = false;
+    if (verbose && serialDebugEnabled())
+    {
+      Serial.print(F("[MAG] BMM150 init attempt "));
+      Serial.print(bmm150InitAttempts);
+      Serial.println(F(" failed; will retry in background"));
+    }
+    return false;
+  }
+
+  void retryBmm150IfNeeded()
+  {
+    if (bmm150Ready)
+    {
+      return;
+    }
+
+    const unsigned long now = millis();
+    if (now - lastBmm150RetryMs < BMM150_RETRY_INTERVAL_MS)
+    {
+      return;
+    }
+
+    lastBmm150RetryMs = now;
+    tryInitBmm150(true);
+  }
+#endif
 
   void copyText(char *dst, size_t dstSize, const char *src)
   {
@@ -507,7 +570,8 @@ namespace
 
     if (pinEquals(PIN_ULTRASONIC, 0) || pinEquals(PIN_ULTRASONIC, 1))
     {
-      Serial.println(F("[PIN WARNING] Ultrasonic is on D0/D1, which conflicts with Serial1."));
+      Serial.println(F("[PIN NOTE] Ultrasonic is intentionally on D0/D1 in this build."));
+      Serial.println(F("[PIN NOTE] If readings fail, test Serial1/D1 interaction first."));
     }
     if (pinEquals(PIN_IR_INTERRUPT, 4))
     {
@@ -550,29 +614,20 @@ void setupRoverHardware()
   attachInterrupt(digitalPinToInterrupt(PIN_IR_INTERRUPT), irPulseISR, RISING);
 
   Wire.begin();
-  const int BMM150_MAX_RETRIES = 3;
-  for (int attempt = 1; attempt <= BMM150_MAX_RETRIES; attempt++)
-  {
-    if (bmm150.begin() == BMM150_OK)
-    {
-      bmm150.setOperationMode(BMM150_POWERMODE_NORMAL);
-      bmm150.setPresetMode(BMM150_PRESETMODE_HIGHACCURACY);
-      bmm150.setRate(BMM150_DATA_RATE_10HZ);
-      bmm150.setMeasurementXYZ();
-      bmm150Ready = true;
-      Serial.println(F("[MAG] BMM150 initialised OK; XYZ measurement enabled"));
-      break;
-    }
 
-    Serial.print(F("[MAG] BMM150 init attempt "));
-    Serial.print(attempt);
-    Serial.println(F(" failed; check SDA/SCL and CS->GND"));
-    delay(500);
-  }
+  /*
+    Standalone-power fix:
+    The magnetometer may not be fully awake at the exact moment the Metro M0
+    boots from a battery/wall adapter. The older code tried only at startup and
+    then permanently marked bmm150_ready=false. Now we do one fast attempt here
+    and keep retrying in runRoverTasks() without blocking HTTP.
+  */
+  lastBmm150RetryMs = millis();
+  tryInitBmm150(true);
 
-  if (!bmm150Ready)
+  if (!bmm150Ready && serialDebugEnabled())
   {
-    Serial.println(F("[MAG] BMM150 unavailable; using IR + ultrasonic when possible"));
+    Serial.println(F("[MAG] BMM150 unavailable at boot; /debug and /i2cscan can diagnose it"));
   }
 #endif
 
@@ -593,6 +648,10 @@ void runRoverTasks()
   const unsigned long now = millis();
 
   pollUart();
+
+#if !ROVER_SIMULATED_MODE
+  retryBmm150IfNeeded();
+#endif
 
 #if ROVER_SIMULATED_MODE
   if (now - lastSimUart >= SIM_UART_INTERVAL_MS)
@@ -751,6 +810,10 @@ String roverDebugJson()
 #endif
   json += ",\"bmm150_ready\":";
   json += bmm150Ready ? "true" : "false";
+  json += ",\"bmm150_init_attempts\":";
+  json += bmm150InitAttempts;
+  json += ",\"uptime_ms\":";
+  json += millis();
   json += ",\"pins\":{";
   json += "\"ir_interrupt\":"; json += PIN_IR_INTERRUPT;
   json += ",\"ultrasonic\":"; json += PIN_ULTRASONIC;
@@ -768,8 +831,46 @@ String roverDebugJson()
   return json;
 }
 
+
+String roverI2cScanJson()
+{
+  String json = "{\"devices\":[";
+  bool first = true;
+
+#if ROVER_SIMULATED_MODE
+  json += "\"simulated\"";
+#else
+  for (uint8_t address = 1; address < 127; address++)
+  {
+    Wire.beginTransmission(address);
+    const uint8_t error = Wire.endTransmission();
+    if (error == 0)
+    {
+      if (!first) json += ',';
+      first = false;
+      json += "\"0x";
+      if (address < 16) json += '0';
+      json += String(address, HEX);
+      json += "\"";
+    }
+  }
+#endif
+
+  json += "],\"bmm150_ready\":";
+  json += bmm150Ready ? "true" : "false";
+  json += ",\"bmm150_init_attempts\":";
+  json += bmm150InitAttempts;
+  json += "}";
+  return json;
+}
+
 void printFullRoverStatus()
 {
+  if (!serialDebugEnabled())
+  {
+    return;
+  }
+
   Serial.println(F("========== ROCK CLASSIFICATION STATUS =========="));
 
   Serial.print(F("  Age:  "));

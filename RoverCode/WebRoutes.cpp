@@ -19,10 +19,11 @@ extern WiFiServer server;
 namespace
 {
   unsigned long requestCount = 0;
+  unsigned long lastMotorCommandSeq = 0; // Dashboard adds seq so late old move packets cannot override a newer stop.
 
   const char ROOT_TEXT[] =
-      "EEELunarRover raw WiFi debug build\n"
-      "Open /dashboard for controls.\n"
+      "EEELunarRover raw WiFi production build\n"
+      "Open /dashboard for WASD controls.\n"
       "Test /api/ping first.\n";
 
   const char DASHBOARD_HTML[] = R"HTML(<!doctype html>
@@ -30,77 +31,157 @@ namespace
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EEELunarRover Debug Dashboard</title>
+<title>EEELunarRover Control</title>
 <style>
-body{font-family:system-ui,Arial;margin:20px;max-width:900px;background:#10131a;color:#e8edf7}
-.card{border:1px solid #303848;border-radius:12px;padding:14px;margin:12px 0;background:#171c25}
-button{font-size:16px;padding:10px 14px;margin:4px;border:1px solid #4b5568;border-radius:8px;background:#202838;color:#e8edf7}
-button:active{background:#2f6feb}.grid{display:grid;grid-template-columns:repeat(3,72px);gap:4px;align-items:center}
-pre{white-space:pre-wrap;background:#0b0e13;border-radius:8px;padding:12px;overflow:auto}.muted{color:#9aa6b8}
-input[type=range]{width:260px}.ok{color:#4ade80}.bad{color:#fb7185}
+:root{font-family:system-ui,Arial;background:#0f1218;color:#f2f5fb}body{margin:0;padding:16px;max-width:760px}h1{margin:0 0 6px}.sub{color:#9aa6b8;margin:0 0 14px}.grid{display:grid;gap:12px}.card{background:#171c25;border:1px solid #303848;border-radius:14px;padding:14px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.big{font-size:32px;font-weight:800}.pill{display:inline-block;border:1px solid #4b5568;border-radius:999px;padding:7px 12px;background:#202838}.ok{color:#4ade80}.warn{color:#facc15}.bad{color:#fb7185}button{font:inherit;font-weight:700;border:1px solid #4b5568;border-radius:10px;background:#202838;color:#f2f5fb;padding:10px 14px}button:active{background:#2f6feb}.keys{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:360px;margin-top:12px}.key{border:1px solid #4b5568;border-radius:12px;padding:12px;text-align:center;background:#202838;font-weight:800;user-select:none}.key span{display:block;font-size:12px;color:#9aa6b8;font-weight:500}.key.on{background:#2f6feb;border-color:#8ab4ff;color:white}.key.on span{color:white}.metric{display:grid;grid-template-columns:110px 1fr;gap:5px 10px}.label{color:#9aa6b8}pre{white-space:pre-wrap;background:#0b0e13;border-radius:10px;padding:10px;overflow:auto}details{color:#cbd5e1}summary{cursor:pointer;color:#9aa6b8}.footer{font-size:13px;color:#9aa6b8}
 </style>
 </head>
-<body>
-<h1>EEELunarRover Debug Dashboard</h1>
-<p class="muted">This page sends one request at a time and closes every socket. Test APIs directly if anything looks wrong.</p>
-
-<div class="card">
-  <h2>Connection</h2>
-  <button onclick="ping()">Ping</button>
-  <button onclick="loadSensor()">Read sensor</button>
-  <button onclick="loadDebug()">Debug JSON</button>
-  <span id="conn" class="muted">not tested</span>
+<body tabindex="0">
+<h1>EEELunarRover</h1>
+<p class="sub">Hold WASD / arrows to drive. Release keys to stop. Press Z to toggle 110/255 PWM.</p>
+<div class="grid">
+  <section class="card">
+    <div class="row">
+      <span>Command</span><span id="cmdText" class="big warn">STOP</span>
+      <span class="pill">Speed <b id="speedText">110</b></span>
+      <button id="speedBtn" onclick="toggleSpeed('button')">Z: speed</button>
+      <button onclick="emergencyStop('button')">EMERGENCY STOP</button>
+    </div>
+    <div class="keys">
+      <div></div><div id="keyW" class="key">W<span>forward</span></div><div></div>
+      <div id="keyA" class="key">A<span>left</span></div><div id="keyS" class="key">S<span>back</span></div><div id="keyD" class="key">D<span>right</span></div>
+      <div id="keyQ" class="key">Q<span>rotate L</span></div><div id="keyZ" class="key">Z<span>110/255</span></div><div id="keyE" class="key">E<span>rotate R</span></div>
+    </div>
+    <p id="motorStatus" class="footer">ready</p>
+  </section>
+  <section class="card">
+    <h2>Rock telemetry</h2>
+    <div class="metric">
+      <div class="label">Rock</div><div id="rock">--</div>
+      <div class="label">Confidence</div><div id="fusion">--</div>
+      <div class="label">Age</div><div id="age">--</div>
+      <div class="label">IR</div><div id="ir">--</div>
+      <div class="label">Ultrasonic</div><div id="us">--</div>
+      <div class="label">Magnetic</div><div id="mag">--</div>
+    </div>
+  </section>
+  <section class="card">
+    <div class="row">
+      <button onclick="ping()">Ping</button>
+      <button onclick="loadSensor()">Refresh sensor</button>
+      <button onclick="loadDebug()">Debug</button>
+      <button onclick="loadI2c()">I2C</button>
+      <button onclick="sendMotor('w','test forward');setTimeout(function(){sendMotor('stop','test auto-stop');},350)">Motor test</button>
+      <span id="conn" class="footer">not tested</span>
+    </div>
+    <details><summary>Raw JSON</summary><pre id="rawOut">not loaded</pre></details>
+  </section>
 </div>
-
-<div class="card">
-  <h2>Motor test</h2>
-  <div>Speed: <b id="speedText">180</b></div>
-  <input id="speed" type="range" min="0" max="255" value="180" oninput="speedText.textContent=this.value">
-  <div class="grid">
-    <button onclick="motor('wa')">↖</button><button onclick="motor('w')">↑</button><button onclick="motor('wd')">↗</button>
-    <button onclick="motor('a')">←</button><button onclick="motor('stop')">■</button><button onclick="motor('d')">→</button>
-    <button onclick="motor('sa')">↙</button><button onclick="motor('s')">↓</button><button onclick="motor('sd')">↘</button>
-  </div>
-  <button onclick="motor('q')">Rotate CCW</button>
-  <button onclick="motor('e')">Rotate CW</button>
-  <button onclick="motor('stop')">STOP</button>
-</div>
-
-<div class="card">
-  <h2>Sensor JSON</h2>
-  <pre id="sensorOut">not loaded</pre>
-</div>
-
-<div class="card">
-  <h2>Debug JSON</h2>
-  <pre id="debugOut">not loaded</pre>
-</div>
-
+<p class="footer">Safety: blur, tab switch, page close, or motor watchdog all stop the rover.</p>
 <script>
-let busy=false,pending=null;
-function api(path){return path;}
+const pressed={};
+const speeds=[110,255];
+let speedIndex=0,currentCmd='stop',motorSeq=0,keepaliveId=null,apiBusy=false,apiPending=null;
+const motorRequests=[];
+function speed(){return speeds[speedIndex];}
+function setText(id,v){document.getElementById(id).textContent=v;}
+function setClass(id,c){document.getElementById(id).className=c;}
 function req(path,cb){
-  if(busy){pending=[path,cb];return;}
-  busy=true;
+  if(apiBusy){apiPending=[path,cb];return;}
+  apiBusy=true;
+  const x=new XMLHttpRequest();x.timeout=3000;
+  x.onreadystatechange=function(){if(x.readyState===4){apiBusy=false;cb(x.status,x.responseText);if(apiPending){const p=apiPending;apiPending=null;req(p[0],p[1]);}}};
+  x.ontimeout=function(){apiBusy=false;cb(0,'timeout');};
+  x.open('GET',path);x.send();
+}
+function sendMotor(c,why){
+  motorSeq++;
+  const seq=motorSeq;
+  const url='/motor?cmd='+encodeURIComponent(c)+'&speed='+speed()+'&seq='+seq+'&_t='+Date.now();
   const x=new XMLHttpRequest();
-  x.timeout=1500;
+
+  // Keep the XHR object in motorRequests until it finishes.
+  // A temporary Image() request can be garbage-collected by the browser before
+  // the GET reliably reaches a tiny embedded server. Retained XHR is more
+  // predictable while still being fast enough for WASD control.
+  motorRequests.push(x);
+  while(motorRequests.length>8){motorRequests.shift();}
+
+  x.timeout=700;
   x.onreadystatechange=function(){
     if(x.readyState===4){
-      busy=false;
-      cb(x.status,x.responseText);
-      if(pending){const p=pending;pending=null;req(p[0],p[1]);}
+      const i=motorRequests.indexOf(x); if(i>=0)motorRequests.splice(i,1);
+      if(seq===motorSeq){
+        const body=(x.responseText||'').trim();
+        setText('motorStatus','ack '+(body||c).toUpperCase()+' | speed '+speed()+' | HTTP '+x.status+' | #'+seq);
+      }
     }
   };
-  x.ontimeout=function(){busy=false;cb(0,'timeout');};
-  x.open('GET',api(path));
+  x.ontimeout=function(){
+    const i=motorRequests.indexOf(x); if(i>=0)motorRequests.splice(i,1);
+    if(seq===motorSeq)setText('motorStatus','motor request timeout | '+c.toUpperCase()+' | #'+seq);
+  };
+  x.onerror=function(){
+    const i=motorRequests.indexOf(x); if(i>=0)motorRequests.splice(i,1);
+    if(seq===motorSeq)setText('motorStatus','motor request failed | '+c.toUpperCase()+' | #'+seq);
+  };
+  x.open('GET',url,true);
   x.send();
+  setText('motorStatus','sending '+c.toUpperCase()+' | speed '+speed()+' | '+why+' | #'+seq);
 }
-function ping(){req('/api/ping?_t='+Date.now(),function(s,t){conn.textContent=s===200?'pong OK':'failed: '+t;conn.className=s===200?'ok':'bad';});}
-function loadSensor(){req('/sensor?_t='+Date.now(),function(s,t){sensorOut.textContent=t;});}
-function loadDebug(){req('/debug?_t='+Date.now(),function(s,t){debugOut.textContent=t;});}
-function motor(c){const sp=document.getElementById('speed').value;req('/motor?cmd='+encodeURIComponent(c)+'&speed='+sp+'&_t='+Date.now(),function(s,t){conn.textContent='motor '+c+' -> '+t.trim();});}
-setInterval(loadSensor,3000);
-ping();loadSensor();loadDebug();
+function commandFromKeys(){
+  const w=!!pressed.w,a=!!pressed.a,s=!!pressed.s,d=!!pressed.d,q=!!pressed.q,e=!!pressed.e;
+  if(q&&!e)return 'q'; if(e&&!q)return 'e';
+  const y=(w?1:0)-(s?1:0), x=(d?1:0)-(a?1:0);
+  if(y===1&&x===0)return 'w'; if(y===-1&&x===0)return 's'; if(y===0&&x===-1)return 'a'; if(y===0&&x===1)return 'd';
+  if(y===1&&x===-1)return 'wa'; if(y===1&&x===1)return 'wd'; if(y===-1&&x===-1)return 'sa'; if(y===-1&&x===1)return 'sd';
+  return 'stop';
+}
+function refreshUi(){
+  ['w','a','s','d','q','e'].forEach(k=>{const el=document.getElementById('key'+k.toUpperCase()); if(el)el.className=pressed[k]?'key on':'key';});
+  setText('cmdText',currentCmd.toUpperCase()); setClass('cmdText',currentCmd==='stop'?'big warn':'big ok');
+  setText('speedText',speed()); document.getElementById('keyZ').className=speed()===255?'key on':'key';
+}
+function updateDrive(why){
+  const next=commandFromKeys();
+  if(next!==currentCmd){currentCmd=next;refreshUi();sendMotor(next,why); if(next==='stop')stopKeepalive(); else startKeepalive();}
+  else refreshUi();
+}
+function keyName(ev){
+  const k=(ev.key||'').toLowerCase();
+  if(['w','a','s','d','q','e','z'].includes(k))return k;
+  if(ev.code==='ArrowUp')return 'w'; if(ev.code==='ArrowDown')return 's'; if(ev.code==='ArrowLeft')return 'a'; if(ev.code==='ArrowRight')return 'd'; return '';
+}
+function toggleSpeed(why){
+  speedIndex=1-speedIndex; refreshUi();
+  if(currentCmd!=='stop')sendMotor(currentCmd,'speed toggle '+why); else setText('motorStatus','speed set to '+speed());
+}
+window.addEventListener('keydown',function(ev){
+  const k=keyName(ev); if(!k)return; ev.preventDefault();
+  if(k==='z'){if(!ev.repeat)toggleSpeed('z');return;}
+  if(!pressed[k]){pressed[k]=true;updateDrive('keydown '+k);}
+});
+window.addEventListener('keyup',function(ev){
+  const k=keyName(ev); if(!k||k==='z')return; ev.preventDefault();
+  if(pressed[k]){delete pressed[k];updateDrive('keyup '+k);}
+});
+function emergencyStop(why){['w','a','s','d','q','e'].forEach(k=>delete pressed[k]);currentCmd='stop';refreshUi();sendMotor('stop','stop '+why);stopKeepalive();}
+function startKeepalive(){if(keepaliveId)return;keepaliveId=setInterval(function(){if(currentCmd!=='stop')sendMotor(currentCmd,'keepalive');},600);}
+function stopKeepalive(){if(keepaliveId){clearInterval(keepaliveId);keepaliveId=null;}}
+window.addEventListener('blur',function(){emergencyStop('window blur');});
+document.addEventListener('visibilitychange',function(){if(document.hidden)emergencyStop('page hidden');});
+window.addEventListener('beforeunload',function(){sendMotor('stop','page unload');});
+function fmtConf(v){return v==null?'--':Math.round(v*100)+'%';}
+function showSensor(t){
+  setText('rawOut',t);
+  try{const j=JSON.parse(t);setText('rock',j.rockType||'UNKNOWN');setText('fusion',fmtConf(j.fusionConf));setText('age',j.age||'--');setText('ir',(j.ir&&j.ir.label)||'--');setText('us',(j.ultrasonic&&j.ultrasonic.label)||'--');setText('mag',(j.magnetic&&j.magnetic.label)||'--');}
+  catch(e){setText('rawOut','sensor parse failed: '+e+'\n'+t);}
+}
+function ping(){req('/api/ping?_t='+Date.now(),function(s,t){setText('conn',s===200?'online':'failed: '+t);setClass('conn',s===200?'ok':'bad');});}
+function loadSensor(){req('/sensor?_t='+Date.now(),function(s,t){if(s===200)showSensor(t);else setText('rawOut','sensor failed: '+t);});}
+function loadDebug(){req('/debug?_t='+Date.now(),function(s,t){setText('rawOut',t);});}
+function loadI2c(){req('/i2cscan?_t='+Date.now(),function(s,t){setText('rawOut',t);});}
+refreshUi();ping();loadSensor();setInterval(loadSensor,1500);document.body.focus();
 </script>
 </body>
 </html>)HTML";
@@ -203,7 +284,22 @@ ping();loadSensor();loadDebug();
   void sendString(WiFiClient &client, int code, const char *status, const char *contentType, const String &body)
   {
     sendHeaders(client, code, status, contentType, body.length());
-    client.print(body);
+
+    /*
+      Write String responses in small chunks too. This matters when the rover is
+      standalone on a phone hotspot: large writes can occasionally block longer
+      than the browser's XHR timeout, even though the route itself is simple.
+    */
+    const size_t CHUNK_SIZE = 64;
+    size_t index = 0;
+    while (index < body.length())
+    {
+      const size_t remaining = body.length() - index;
+      const size_t n = remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining;
+      client.write((const uint8_t *)body.c_str() + index, n);
+      index += n;
+      delay(1);
+    }
   }
 
   bool targetMatchesPath(const char *target, const char *path)
@@ -222,6 +318,7 @@ ping();loadSensor();loadDebug();
            targetMatchesPath(target, "/api/state") ||
            targetMatchesPath(target, "/sensor") ||
            targetMatchesPath(target, "/debug") ||
+           targetMatchesPath(target, "/i2cscan") ||
            targetMatchesPath(target, "/motor") ||
            targetMatchesPath(target, "/health") ||
            targetMatchesPath(target, "/favicon.ico");
@@ -313,6 +410,15 @@ ping();loadSensor();loadDebug();
     sendString(client, 200, "OK", "application/json", json);
   }
 
+
+  void handleI2cScan(WiFiClient &client)
+  {
+    requestCount++;
+    String json = roverI2cScanJson();
+    json += '\n';
+    sendString(client, 200, "OK", "application/json", json);
+  }
+
   void handleMotor(WiFiClient &client, const char *target)
   {
     requestCount++;
@@ -323,6 +429,24 @@ ping();loadSensor();loadDebug();
     int speed = -1;
     const char *speedValue = findQueryValue(target, "speed");
     if (speedValue) speed = atoi(speedValue);
+
+    /*
+      The WASD dashboard adds seq=1,2,3... to every motor request.
+      If the hotspot/browser delivers an older move request after a newer stop,
+      this guard prevents that old request from re-starting the rover.
+      Manual URLs without seq still work normally for testing.
+    */
+    const char *seqValue = findQueryValue(target, "seq");
+    if (seqValue)
+    {
+      const unsigned long seq = strtoul(seqValue, nullptr, 10);
+      if (seq > 0 && seq <= lastMotorCommandSeq)
+      {
+        sendText(client, 200, "OK", "text/plain", "stale\n");
+        return;
+      }
+      if (seq > 0) lastMotorCommandSeq = seq;
+    }
 
     char normalized[8];
     bool known = true;
@@ -399,6 +523,7 @@ void handleHttpClient()
   else if (targetMatchesPath(target, "/api/status") || targetMatchesPath(target, "/api/state")) handleStatus(client);
   else if (targetMatchesPath(target, "/sensor")) handleSensor(client);
   else if (targetMatchesPath(target, "/debug")) handleDebug(client);
+  else if (targetMatchesPath(target, "/i2cscan")) handleI2cScan(client);
   else if (targetMatchesPath(target, "/motor")) handleMotor(client, target);
   else if (targetMatchesPath(target, "/health"))
   {
